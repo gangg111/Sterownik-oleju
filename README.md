@@ -144,3 +144,35 @@ dopóki woda nie wystygnie poniżej „TEMP. WYŁĄCZENIA REG.”. Minimum, któ
 | Praca, temp. ≥ zadana (podtrzymanie) | wył. (przedmuch = 0) | stoi |
 | Temp. spadła poniżej „wyłączenia reg.” | wył. → STOP | stoi |
 | STB / termostat spalin rozwarty | (wł.), ale cewka bez zasilania | stoi |
+
+---
+
+## 7. Hydraulika: pompa zatapiana + zawór iglicowy + powrót do zbiornika
+
+```
+                       odpowietrzenie / zrywacz syfonu
+                       (koniec rurki NAD lustrem oleju)
+                                  ▲
+                       rurka powrotna wznosi się 20–40 cm,
+                       potem opada z powrotem do zbiornika
+                                  │
+  pompa ──wąż──► [filtr] ──► TRÓJNIK ──► zawór iglicowy ──► elektrozawór 12V NC ──► palnik
+  (w zbiorniku)                (nad zbiornikiem)            (przy palniku, opcja)
+```
+
+- **Zawór iglicowy na linii DO PALNIKA, a powrót otwarty.** Gdy zaworek zarośnie szlamem, do palnika
+  pójdzie *mniej* oleju (płomień zgaśnie → blokada sterownika), a nie więcej. Zaworek na powrocie
+  działałby odwrotnie: zatkany = cały wydatek pompy do palnika.
+- **Rurka powrotna** robi dwie rzeczy: nadwyżka oleju wraca do zbiornika (pompa nigdy nie tłoczy
+  w zamknięte wyjście), a jej wysokość ustala stałe ciśnienie przed zaworkiem – przepływ do palnika
+  mniej zależy od obrotów pompy.
+- **Koniec powrotu nad lustrem oleju, nie zanurzony** – po zatrzymaniu pompy wpuszcza powietrze do trójnika
+  i przerywa syfon, gdy palnik stoi niżej niż zbiornik.
+- **Elektrozawór NC** zasilaj z +12 V za przekaźnikiem (otwarty cały czas, gdy dmuchawa jest załączona),
+  a nie z wyjścia PWM pompy – na PWM by brzęczał.
+
+Części: wąż olejoodporny (paliwowy NBR) 6–8 mm, opaski, trójnik mosiężny z króćcami na wąż,
+zawór iglicowy mosiężny 1/4" BSP + 2 króćce 1/4" → wąż, filtr paliwa (ciągnikowy/motocyklowy) przed trójnikiem.
+
+**Regulacja:** zaworek zgrubnie (raz), enkoder (interwał) na bieżąco. Gęstość przepracowanego oleju
+mocno zależy od temperatury – zaworek ustawiaj, gdy olej ma temperaturę pracy.
