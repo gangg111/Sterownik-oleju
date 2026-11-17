@@ -775,20 +775,28 @@ void drawMain(uint32_t now) {
     bar = doseActive ? 128 : (uint8_t)(min(el, iMs) * 128UL / iMs);
   }
 
-  // Ikona 2 (kropla) = cykl dawkowania: na poczatku dawki kropla spada i rozpryskuje sie
-  // (klatki 3..7), potem przez reszte interwalu powoli rosnie na dyszy (klatki 0..2).
-  uint8_t dropF = IKONA_KROPLA_KLATKI - 1;  // stoi: pusta miseczka
-  if (state == ST_RUN || state == ST_IGNITION) {
+  bool cycling = (state == ST_RUN || state == ST_IGNITION);
+
+  // Ikona 2 (kropla) = dawkowanie: na poczatku kazdej dawki kropla spada i rozpryskuje sie
+  // (klatki 3..7), miedzy dawkami kropla na dyszy "pulsuje" (klatki 0-1-2-1).
+  // Bez pracy (YETI wylaczone, blokada) stoi pusta miseczka.
+  uint8_t dropF = IKONA_KROPLA_KLATKI - 1;
+  if (cycling) {
     const uint32_t fall = 5UL * ANIM_STEP_MS;
-    uint32_t iMs = intervalMs(), el = now - cycleStartMs;
-    if (el < fall) dropF = 3 + el / ANIM_STEP_MS;
-    else if (iMs > fall) dropF = (uint8_t)min(2UL, (el - fall) * 3UL / (iMs - fall));
-    else dropF = 2;
+    uint32_t el = now - cycleStartMs;
+    static const uint8_t PULSE[4] = {0, 1, 2, 1};
+    dropF = el < fall ? 3 + el / ANIM_STEP_MS : PULSE[(el / 250) % 4];
   }
 
-  // Ikona 5 (korba) = praca pompy: kreci sie, gdy silnik ma prad; zatrzymuje sie w miejscu
+  // Ikona 5 (korba) = praca pompy: szybko, gdy silnik podaje olej (10 kl/s),
+  // wolno w przerwie miedzy dawkami (3 kl/s), stoi gdy pompa nie pracuje.
   static uint8_t crankF = 0;
-  if (pumpDuty > 0) crankF = (now / ANIM_STEP_MS) % IKONA_KORBA_KLATKI;
+  static uint32_t crankMs = 0;
+  uint16_t crankStep = pumpDuty > 0 ? ANIM_STEP_MS : (cycling ? 3 * ANIM_STEP_MS : 0);
+  if (crankStep && now - crankMs >= crankStep) {
+    crankMs = now;
+    crankF = (crankF + 1) % IKONA_KORBA_KLATKI;
+  }
 
   oled.firstPage();
   do {
