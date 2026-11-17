@@ -24,6 +24,7 @@
 #include <U8g2lib.h>
 #include <avr/wdt.h>
 #include <stddef.h>
+#include "ikony_pompy.h"   // animowane ikony 24x24 (tools/ikony_pompy.py)
 
 // ============================================================================
 //  KONFIGURACJA SPRZETU - dopasuj do swojego ukladu
@@ -59,7 +60,8 @@ const uint16_t YETI_EDGE_TIMEOUT  = 40;    // brak zboczy dluzej = brak 230 V
 const uint16_t RELAY_FAULT_MS     = 3000;
 const uint16_t BTN_DEBOUNCE_MS    = 25;
 const uint16_t BTN_LONG_MS        = 1500;
-const uint16_t DISPLAY_PERIOD_MS  = 200;
+const uint16_t DISPLAY_PERIOD_MS  = 100;   // 10 klatek/s - plynne animacje ikon
+const uint16_t ANIM_STEP_MS       = 100;   // czas jednej klatki animacji
 const uint16_t TC_PERIOD_MS       = 300;   // MAX6675 potrzebuje ~220 ms na pomiar
 const uint8_t  TC_FAULT_COUNT     = 3;
 const uint8_t  FLAME_HYST_C       = 10;
@@ -721,7 +723,7 @@ void drawLines(const char *title, char lines[][24], uint8_t n, int8_t highlight)
 }
 
 void drawMain(uint32_t now) {
-  char top[24], big[10], info[24];
+  char big[10], info[24];
 
   if (state == ST_LOCKOUT) {
     char l[4][24];
@@ -740,12 +742,11 @@ void drawMain(uint32_t now) {
   switch (cfg.v[P_FLAME_MODE]) {
     case FM_THERMOCOUPLE:
       if (flueValid) snprintf_P(fl, sizeof fl, PSTR("%dC"), flueTempC);
-      else strcpy_P(fl, PSTR("czujn?"));
+      else strcpy_P(fl, PSTR("cz.?"));
       break;
-    case FM_THERMOSTAT: strcpy_P(fl, flamePresent ? PSTR("plom.OK") : PSTR("plom.--")); break;
-    default:            strcpy_P(fl, PSTR("bez kontr")); break;
+    case FM_THERMOSTAT: strcpy_P(fl, flamePresent ? PSTR("pl.OK") : PSTR("pl.--")); break;
+    default:            strcpy_P(fl, PSTR("!plom")); break;  // brak kontroli plomienia
   }
-  snprintf_P(top, sizeof top, PSTR("%-11s%9s"), st, fl);
 
   // duza liczba: interwal
   uint16_t iv = cfg.v[P_INTERVAL];
@@ -774,19 +775,38 @@ void drawMain(uint32_t now) {
     bar = doseActive ? 128 : (uint8_t)(min(el, iMs) * 128UL / iMs);
   }
 
+  // Ikona 2 (kropla) = cykl dawkowania: na poczatku dawki kropla spada i rozpryskuje sie
+  // (klatki 3..7), potem przez reszte interwalu powoli rosnie na dyszy (klatki 0..2).
+  uint8_t dropF = IKONA_KROPLA_KLATKI - 1;  // stoi: pusta miseczka
+  if (state == ST_RUN || state == ST_IGNITION) {
+    const uint32_t fall = 5UL * ANIM_STEP_MS;
+    uint32_t iMs = intervalMs(), el = now - cycleStartMs;
+    if (el < fall) dropF = 3 + el / ANIM_STEP_MS;
+    else if (iMs > fall) dropF = (uint8_t)min(2UL, (el - fall) * 3UL / (iMs - fall));
+    else dropF = 2;
+  }
+
+  // Ikona 5 (korba) = praca pompy: kreci sie, gdy silnik ma prad; zatrzymuje sie w miejscu
+  static uint8_t crankF = 0;
+  if (pumpDuty > 0) crankF = (now / ANIM_STEP_MS) % IKONA_KORBA_KLATKI;
+
   oled.firstPage();
   do {
+    // gorny pasek: stan po lewej, plomien do x=100; prawy gorny rog = ikona pracy pompy
     oled.setFont(u8g2_font_6x10_tr);
-    oled.drawStr(0, 9, top);
-    oled.drawHLine(0, 11, 128);
-    drawStrP(0, 24, PSTR("DAWKA"));
-    drawStrP(0, 35, PSTR("CO"));
-    if (doseActive && pumpDuty > 0) drawStrP(0, 46, PSTR(">>>"));
+    oled.drawStr(0, 9, st);
+    oled.drawStr(100 - oled.getStrWidth(fl), 9, fl);
+    oled.drawHLine(0, 11, 101);
+    oled.drawXBMP(104, 0, IKONA_W, IKONA_H, IKONA_KORBA[crankF]);
+    // lewa strona: ikona dawkowania + podpis
+    oled.drawXBMP(0, 14, IKONA_W, IKONA_H, IKONA_KROPLA[dropF]);
+    oled.setFont(u8g2_font_5x7_tr);
+    drawStrP(0, 46, PSTR("DAWKA"));
+    // srodek: interwal (do x=100, zeby nie wchodzic pod ikone w rogu)
     oled.setFont(u8g2_font_logisoso24_tn);
-    uint8_t w = oled.getStrWidth(big);
-    oled.drawStr(112 - w, 44, big);
+    oled.drawStr(100 - oled.getStrWidth(big), 46, big);
     oled.setFont(u8g2_font_7x14B_tr);
-    drawStrP(116, 44, PSTR("s"));
+    drawStrP(104, 46, PSTR("s"));
     oled.setFont(u8g2_font_6x10_tr);
     oled.drawStr(0, 56, info);
     oled.drawFrame(0, 59, 128, 5);
