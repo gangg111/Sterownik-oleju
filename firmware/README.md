@@ -1,0 +1,140 @@
+# Firmware – sterownik dawkowania oleju (Arduino Nano + OLED + enkoder)
+
+Arduino przejmuje sterowanie pompką: YETI mówi tylko **„grzej / nie grzej”** (wyjście „Dmuchawa”),
+a Arduino co ustawiony **interwał** podaje **jedną dawkę oleju**. Interwał ustawiasz enkoderem
+bezpośrednio na ekranie głównym.
+
+```
+┌────────────────────────────┐
+│PRACA                  245C │   stan + temperatura płomienia/spalin
+├────────────────────────────┤
+│DAWKA                       │
+│CO              6.0 s       │   ← kręcisz enkoderem = zmieniasz interwał
+│>>>                         │   (>>> = pompka teraz podaje)
+│10.0/min 0.60l/h            │   dawek na minutę, przepływ (po kalibracji)
+│[██████████░░░░░░░░░░░░░░░] │   czas do następnej dawki
+└────────────────────────────┘
+```
+
+- **Interwał** = czas od początku jednej dawki do początku następnej (0,5 – 120 s).
+  Krok enkodera: 0,1 s do 10 s, 0,5 s do 30 s, potem 1 s. Zapis do EEPROM 3 s po ostatnim ruchu.
+- Mniejszy interwał → więcej oleju → większa moc palnika.
+
+## Tryby dawki
+
+| Tryb | Jak liczona jest dawka | Kiedy |
+|---|---|---|
+| **czas** | silnik pracuje przez „Czas dawki” (0,1 – 30 s) | pompa zębata / perystaltyczna / brak krańcówki |
+| **obroty** | silnik robi N pełnych obrotów, liczonych **krańcówką (stykiem parkowania) wycieraczki** | pompa tłoczkowa / mimośrodowa – 1 obrót = 1 skok = stała dawka |
+
+Tryb **obroty** jest dokładniejszy: dawka nie zależy od napięcia, temperatury i gęstości oleju.
+Dodatkowo, jeśli silnik pracuje, a krańcówka przez 8 s nie zgłosi obrotu
+(zablokowana pompa, zerwany przewód), sterownik przechodzi w **blokadę „Pompa/krancowka”**.
+
+## Menu (klik na ekranie głównym)
+
+| Pozycja | Zakres | Domyślnie | Opis |
+|---|---|---|---|
+| Interwal | 0,5 – 120 s | 6,0 s | to samo co enkoder na ekranie głównym |
+| Tryb dawki | czas / obroty | czas | patrz wyżej |
+| Czas dawki | 0,1 – 30 s | 0,5 s | tryb „czas” |
+| Obroty/daw. | 1 – 20 | 1 | tryb „obroty” |
+| ml/dawke | 0 – 20 ml | brak | kalibracja → ekran pokazuje l/h i zużycie |
+| Moc pompy | 20 – 100 % | 100 % | PWM silnika (wolniejsze obroty) |
+| Kopniecie | 0 – 2000 ms | 200 ms | pełna moc na starcie każdej dawki |
+| Czujnik pl. | brak / termostat / termopara | brak | kontrola płomienia |
+| Prog plom. | 40 – 600 °C | 120 °C | termopara: powyżej = płomień jest |
+| Czas zapl. | 1 – 30 min | 5 min | tyle może trwać rozpalanie bez płomienia → blokada |
+| Zanik plom. | 5 – 300 s | 60 s | tyle płomienia może nie być w trakcie pracy → blokada |
+| Informacje | | | YETI, 12 V, czas pracy, liczba dawek, litry, stan krańcówki |
+| Odpowietrzanie | | | pompka pracuje, dopóki trzymasz przycisk (max 60 s) |
+
+Edycja: klik = zapisz, przytrzymanie = anuluj. Blokadę kasuje się **przytrzymaniem przycisku**
+na ekranie głównym (pierwszy klik wycisza buzzer). Blokada przetrwa wyłączenie zasilania.
+
+### Kalibracja (ml/dawkę)
+1. Menu → Odpowietrzanie – napełnij przewody olejem.
+2. Ustaw interwał np. 5 s, wylot pompki do menzurki, odczekaj 20 dawek (Informacje → licznik dawek).
+3. ml/dawkę = zebrane ml / 20 → wpisz w menu. Od teraz ekran pokazuje **l/h**.
+
+## Schemat połączeń
+
+```
+                      +12 V z zasilacza (na stałe)
+                            │
+                     [bezpiecznik 10 A]
+                            │
+                styk NO przekaźnika 230 V (cewka ← YETI „Dmuchawa” przez STB 95°C)
+                            │
+            +12V_SW ────────┼──────────────────┬──────────────┐
+                            │                  │              │
+                         S  │                [1k]          [10k]
+                     IRF4905 (P-MOSFET)        │              │
+                         G ─┼──────────────────┤             A0 ── [3.3k] ── GND
+                         D  │                  │C
+                            │               BC547            (pomiar 12 V)
+                            │                  │E
+                            │      D9 ─[1k]─ B │
+                            │                 GND   (10k B–E)
+                            │
+          SR560 (K) ────────┤ MOTOR+  → silnik wycieraczki, zacisk 53 (bieg wolny)
+          SR560 (A) ── GND    MOTOR−  → zacisk 31 / obudowa → GND
+                              park 31b → [1k] → D8   (53a NIE podłączać)
+```
+
+**Dlaczego klucz od strony plusa (high-side)?** W silniku wycieraczki obudowa = masa (31),
+a krańcówka parkowania zwiera się właśnie do obudowy. Przy kluczu od strony masy obudowa „wisiałaby”
+i krańcówki nie dałoby się odczytać. Przy okazji obudowa przykręcona do kotła jest pewnie uziemiona.
+
+### Tabela pinów Arduino Nano
+
+| Pin | Podłączenie |
+|---|---|
+| D2, D3 | enkoder A, B (KY-040: CLK, DT) |
+| D4 | przycisk enkodera (SW) |
+| D5 | wyjście modułu transoptora 230 V (YETI „Dmuchawa”) |
+| D6 | termostat spalin NO → GND (opcjonalnie) |
+| D7 | buzzer aktywny 5 V |
+| D8 | krańcówka wycieraczki 31b (przez 1 kΩ, + 100 nF do GND) |
+| D9 | → 1 kΩ → baza BC547 (klucz pompki) |
+| D10, D12, D13 | MAX6675: CS, SO, SCK (opcjonalnie) |
+| A0 | dzielnik 10 kΩ / 3,3 kΩ z +12V_SW |
+| A4, A5 | OLED SDA, SCL |
+| VIN / 5V | zasilanie z przetwornicy 12→5 V (np. mini-360 / LM2596), GND wspólna |
+
+### Krańcówka wycieraczki – sprawdź miernikiem
+Typowe oznaczenia: **31** masa, **53** bieg wolny, **53b** szybki, **53a** +12 V do parkowania,
+**31b** wyjście parkowania. Kręcąc wałkiem ręcznie sprawdź, że **31b–31 zwiera się tylko w pozycji
+parkowania** (wtedy Informacje → „Krancowka: PARK”). Jeśli u Ciebie jest odwrotnie, zmień w kodzie
+`PARK_ACTIVE_LEVEL` na `HIGH`. Zacisku **53a nie podłączaj** – inaczej na 31b pojawi się 12 V.
+
+## Lista części
+
+| Część | Uwagi |
+|---|---|
+| Arduino Nano (ATmega328P, nowy bootloader) | klon z CH340 jest OK |
+| OLED 0.96" SSD1306 128×64 I2C | dla 1.3" SH1106 ustaw `OLED_SH1106 1` |
+| Enkoder KY-040 | jeśli przeskakuje o 2 – `ENC_STEPS_PER_DETENT 2` |
+| Moduł transoptora 230 V AC (1 kanał) | wejście równolegle do cewki przekaźnika |
+| Przekaźnik z cewką 230 V AC, styk ≥ 10 A | twarde odcięcie 12 V niezależne od Arduino |
+| IRF4905 (P-MOSFET) na radiatorze, BC547, rezystory 1k ×3, 10k ×2, 3.3k | klucz pompki |
+| Dioda Schottky SR560 / SB560 | równolegle do silnika (gaszenie przepięć) |
+| Przetwornica 12 V → 5 V | zasilanie Arduino |
+| (opcja) MAX6675 + termopara K | kontrola płomienia – termopara blisko płomienia, nie w kominie |
+| (opcja) buzzer aktywny 5 V | alarm blokady |
+
+## Kompilacja i wgranie
+
+Arduino IDE: zainstaluj bibliotekę **U8g2** (Menedżer bibliotek), otwórz
+`sterownik_oleju/sterownik_oleju.ino`, płytka **Arduino Nano**, procesor **ATmega328P**, Wgraj.
+
+Zajętość: ok. 82 % Flash, 51 % RAM.
+
+## Logika bezpieczeństwa
+
+- 12 V do pompki idzie **przez przekaźnik sterowany z YETI i STB** – zawieszone Arduino nie poleje oleju,
+  gdy YETI nie grzeje.
+- Watchdog 1 s.
+- **Blokady** (pompa stop, buzzer, zapis w EEPROM): brak zapłonu w zadanym czasie, zanik płomienia,
+  uszkodzona termopara, 12 V przy wyłączonym YETI (sklejony przekaźnik), brak obrotu pompy.
+- Bez czujnika płomienia ekran pokazuje „bez kontr” – **ustaw czujnik**, zanim zostawisz piec bez nadzoru.

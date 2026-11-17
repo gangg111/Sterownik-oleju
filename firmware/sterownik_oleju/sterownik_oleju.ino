@@ -7,7 +7,12 @@
  * Wejscia: enkoder z przyciskiem (KY-040), transoptor 230 V (YETI),
  *          czujnik plomienia (termostat bimetaliczny lub termopara K + MAX6675),
  *          pomiar napiecia 12 V za stykiem przekaznika.
- * Wyjscia: MOSFET logic-level (PWM 20 kHz) -> silnik pompki, buzzer.
+ * Wyjscia: klucz high-side (P-MOSFET + NPN, PWM 1 kHz) -> silnik pompki, buzzer.
+ *
+ * Dawkowanie: co ustawiony INTERWAL (od poczatku dawki do poczatku nastepnej)
+ * pompka podaje jedna dawke. Dawka = czas pracy silnika albo N obrotow liczonych
+ * krancowka (stykiem parkowania) wycieraczki. Interwal ustawia sie enkoderem
+ * bezposrednio na ekranie glownym.
  *
  * Biblioteka: U8g2 (Menedzer bibliotek Arduino: "U8g2" by oliver).
  * Opis podlaczenia: firmware/README.md
@@ -30,6 +35,7 @@
 #define V12_PRESENT          8.0f   // [V] powyzej = 12 V za przekaznikiem jest
 #define CHECK_RELAY          1      // 1 = blokada gdy 12 V jest, a YETI nie zalacza
 #define BUZZER_ACTIVE_HIGH   1
+#define PARK_ACTIVE_LEVEL    LOW    // stan pinu krancowki w pozycji parkowania
 
 // Piny
 const uint8_t PIN_ENC_A    = 2;   // INT0
@@ -38,7 +44,8 @@ const uint8_t PIN_ENC_SW   = 4;
 const uint8_t PIN_YETI     = 5;   // wyjscie modulu transoptora 230 V (aktywne LOW)
 const uint8_t PIN_FLAME_IN = 6;   // termostat spalin NO do GND (zwarty = plomien)
 const uint8_t PIN_BUZZER   = 7;
-const uint8_t PIN_PUMP     = 9;   // OC1A -> bramka MOSFET
+const uint8_t PIN_PARK     = 8;   // krancowka wycieraczki (31b), PCINT0
+const uint8_t PIN_PUMP     = 9;   // OC1A -> NPN -> bramka P-MOSFET (HIGH = pompa)
 const uint8_t PIN_TC_CS    = 10;  // MAX6675 CS
 const uint8_t PIN_TC_SO    = 12;  // MAX6675 SO
 const uint8_t PIN_TC_SCK   = 13;  // MAX6675 SCK
@@ -46,7 +53,7 @@ const uint8_t PIN_VSENSE   = A0;  // dzielnik z +12 V (za przekaznikiem)
 // OLED: A4 = SDA, A5 = SCL
 
 // Stale czasowe
-const uint16_t PWM_TOP            = 400;   // 16 MHz / (2 * 400) = 20 kHz
+const uint16_t PWM_TOP            = 1000;  // 16 MHz / (2 * 8 * 1000) = 1 kHz
 const uint16_t YETI_DEBOUNCE_MS   = 150;
 const uint16_t YETI_EDGE_TIMEOUT  = 40;    // brak zboczy dluzej = brak 230 V
 const uint16_t RELAY_FAULT_MS     = 3000;
@@ -59,12 +66,15 @@ const uint8_t  FLAME_HYST_C       = 10;
 const uint32_t UI_TIMEOUT_MS      = 60000;
 const uint32_t PRIME_MAX_MS       = 60000;
 const uint16_t QUICK_SAVE_MS      = 3000;
+const uint16_t PARK_MIN_GAP_MS    = 200;   // krotszy obrot = drgania styku
+const uint32_t REV_TIMEOUT_MS     = 8000;  // brak obrotu w tym czasie = blokada
 
 // ============================================================================
 //  PARAMETRY (zapisywane w EEPROM)
 // ============================================================================
 enum ParamId : uint8_t {
-  P_POWER, P_KICK, P_PULSE_ON, P_PULSE_OFF,
+  P_INTERVAL, P_DOSE_MODE, P_DOSE_TIME, P_DOSE_REVS, P_DOSE_ML,
+  P_POWER, P_KICK,
   P_FLAME_MODE, P_FLAME_TEMP, P_IGN_TIME, P_LOSS_TIME,
   P_COUNT
 };
@@ -72,29 +82,38 @@ enum ParamId : uint8_t {
 // Napisy trzymane we Flash (PROGMEM) - ATmega328P ma tylko 2 KB RAM
 struct ParamDef {
   char name[12];
-  uint16_t minV, maxV, step, defV;
+  uint16_t minV, maxV;
+  uint8_t  step;      // 0 = krok zalezny od wartosci (1 / 5 / 10)
+  uint8_t  dec;       // miejsca po przecinku przy wyswietlaniu
+  uint16_t defV;
   char unit[4];
 };
 
 const ParamDef PARAMS[P_COUNT] PROGMEM = {
-  // nazwa         min   max  krok  domysl. jedn.
-  {"Moc pompy",     10,  100,    5,   60, "%"},
-  {"Kopniecie",      0, 2000,  100,  300, "ms"},
-  {"Impuls ON",      1,  120,    1,   10, "s"},
-  {"Impuls OFF",     0,  120,    1,    0, "s"},
-  {"Czujnik pl.",    0,    2,    1,    0, ""},
-  {"Prog plom.",    40,  600,    5,  120, "C"},
-  {"Czas zapl.",     1,   30,    1,    5, "min"},
-  {"Zanik plom.",    5,  300,    5,   60, "s"},
+  // nazwa         min   max  krok dec domysl. jedn.
+  {"Interwal",       5, 1200,   0,  1,   60, "s"},    // 0.5 .. 120.0 s
+  {"Tryb dawki",     0,    1,   1,  0,    0, ""},     // czas / obroty
+  {"Czas dawki",     1,  300,   0,  1,    5, "s"},    // 0.1 .. 30.0 s
+  {"Obroty/daw.",    1,   20,   1,  0,    1, "obr"},
+  {"ml/dawke",       0, 2000,   0,  2,    0, "ml"},   // 0 = nie skalibrowano
+  {"Moc pompy",     20,  100,   5,  0,  100, "%"},
+  {"Kopniecie",      0, 2000, 100,  0,  200, "ms"},
+  {"Czujnik pl.",    0,    2,   1,  0,    0, ""},
+  {"Prog plom.",    40,  600,   5,  0,  120, "C"},
+  {"Czas zapl.",     1,   30,   1,  0,    5, "min"},
+  {"Zanik plom.",    5,  300,   5,  0,   60, "s"},
 };
 
 enum FlameMode : uint8_t { FM_NONE, FM_THERMOSTAT, FM_THERMOCOUPLE };
 const char FLAME_MODE_NAMES[][10] PROGMEM = {"brak", "termostat", "termopara"};
+enum DoseMode : uint8_t { DM_TIME, DM_REVS };
+const char DOSE_MODE_NAMES[][7] PROGMEM = {"czas", "obroty"};
 
 // odczyt pol definicji parametru z Flash
 uint16_t pMin(uint8_t i)  { return pgm_read_word(&PARAMS[i].minV); }
 uint16_t pMax(uint8_t i)  { return pgm_read_word(&PARAMS[i].maxV); }
-uint16_t pStep(uint8_t i) { return pgm_read_word(&PARAMS[i].step); }
+uint8_t  pStep(uint8_t i) { return pgm_read_byte(&PARAMS[i].step); }
+uint8_t  pDec(uint8_t i)  { return pgm_read_byte(&PARAMS[i].dec); }
 uint16_t pDef(uint8_t i)  { return pgm_read_word(&PARAMS[i].defV); }
 const char *pName(uint8_t i) { return PARAMS[i].name; }  // wskaznik do Flash
 const char *pUnit(uint8_t i) { return PARAMS[i].unit; }  // wskaznik do Flash
@@ -107,7 +126,7 @@ struct Settings {
 };
 
 const uint8_t CFG_MAGIC   = 0xA5;
-const uint8_t CFG_VERSION = 1;
+const uint8_t CFG_VERSION = 2;
 const int     EE_CFG      = 0;
 const int     EE_LOCK     = 64;
 
@@ -119,8 +138,9 @@ Settings cfg;
 enum State : uint8_t { ST_IDLE, ST_IGNITION, ST_RUN, ST_LOCKOUT };
 const char STATE_NAMES[][11] PROGMEM = {"CZUWANIE", "ROZPALANIE", "PRACA", "BLOKADA"};
 
-enum LockReason : uint8_t { L_NONE, L_NO_IGNITION, L_FLAME_LOSS, L_SENSOR, L_RELAY, L_COUNT };
-const char LOCK_NAMES[][16] PROGMEM = {"", "Brak zaplonu", "Zanik plomienia", "Blad czujnika", "Przekaznik/12V"};
+enum LockReason : uint8_t { L_NONE, L_NO_IGNITION, L_FLAME_LOSS, L_SENSOR, L_RELAY, L_PUMP, L_COUNT };
+const char LOCK_NAMES[][16] PROGMEM = {"", "Brak zaplonu", "Zanik plomienia", "Blad czujnika", "Przekaznik/12V",
+                                       "Pompa/krancowka"};
 
 State      state      = ST_IDLE;
 LockReason lockReason = L_NONE;
@@ -139,9 +159,16 @@ bool     flueValid = false;
 uint8_t  tcFaults = 0;
 uint32_t tcLastMs = 0;
 
+// dawkowanie
+volatile uint16_t parkCount = 0;   // liczba wejsc w pozycje parkowania
+volatile uint32_t parkLastMs = 0;
+bool     doseActive = false;
+uint32_t cycleStartMs = 0;         // poczatek ostatniej dawki
+uint32_t doseRunMs = 0;            // czas faktycznej pracy w biezacej dawce
+uint16_t doseParkBase = 0;
+uint32_t doseCount = 0;            // dawki od wlaczenia zasilania
+
 // pompa
-bool     pulseOn = true;
-uint32_t pulseMs = 0;
 bool     pumpWasOn = false;
 uint32_t pumpStartMs = 0;
 uint8_t  pumpDuty = 0;
@@ -150,10 +177,11 @@ uint32_t flameLossMs = 0;
 uint32_t runStartMs = 0;
 
 // UI
-enum UiMode : uint8_t { UI_MAIN, UI_MENU, UI_EDIT, UI_PRIME };
-const uint8_t MENU_PRIME = P_COUNT;
-const uint8_t MENU_EXIT  = P_COUNT + 1;
-const uint8_t MENU_COUNT = P_COUNT + 2;
+enum UiMode : uint8_t { UI_MAIN, UI_MENU, UI_EDIT, UI_PRIME, UI_INFO };
+const uint8_t MENU_INFO  = P_COUNT;
+const uint8_t MENU_PRIME = P_COUNT + 1;
+const uint8_t MENU_EXIT  = P_COUNT + 2;
+const uint8_t MENU_COUNT = P_COUNT + 3;
 
 UiMode   ui = UI_MAIN;
 uint8_t  menuIdx = 0, menuTop = 0;
@@ -246,6 +274,23 @@ ISR(PCINT2_vect) {  // D5 = PCINT21: kazde zbocze z transoptora
   yetiEdgeMs = millis();
 }
 
+ISR(PCINT0_vect) {  // D8 = PCINT0: krancowka wycieraczki
+  if (digitalRead(PIN_PARK) == PARK_ACTIVE_LEVEL) {
+    uint32_t t = millis();
+    if (t - parkLastMs >= PARK_MIN_GAP_MS) {  // odrzuca drgania styku
+      parkCount++;
+      parkLastMs = t;
+    }
+  }
+}
+
+uint16_t readParkCount() {
+  noInterrupts();
+  uint16_t c = parkCount;
+  interrupts();
+  return c;
+}
+
 int8_t readEncoder() {
   noInterrupts();
   int16_t c = encCount;
@@ -261,9 +306,10 @@ int8_t readEncoder() {
 void pumpPwmInit() {
   digitalWrite(PIN_PUMP, LOW);
   pinMode(PIN_PUMP, OUTPUT);
-  // Timer1, tryb 10: phase-correct PWM, TOP = ICR1, preskaler 1 -> 20 kHz
+  // Timer1, tryb 10: phase-correct PWM, TOP = ICR1, preskaler 8 -> 1 kHz
+  // (P-MOSFET z NPN i rezystorem podciagajacym nie nadaza za 20 kHz)
   TCCR1A = _BV(COM1A1) | _BV(WGM11);
-  TCCR1B = _BV(WGM13) | _BV(CS10);
+  TCCR1B = _BV(WGM13) | _BV(CS11);
   ICR1 = PWM_TOP;
   OCR1A = 0;
 }
@@ -387,21 +433,46 @@ uint16_t effectivePower() {
   return cfg.v[P_POWER];
 }
 
+uint32_t intervalMs() {
+  uint16_t v = (ui == UI_EDIT && menuIdx == P_INTERVAL) ? editVal : cfg.v[P_INTERVAL];
+  return (uint32_t)v * 100UL;
+}
+
 void resetCycle(uint32_t now) {
-  pulseOn = true;
-  pulseMs = now;
+  doseActive = false;
+  cycleStartMs = now - intervalMs();  // pierwsza dawka od razu
   ignElapsedMs = 0;
   flameLossMs = 0;
   runStartMs = now;
 }
 
-void updatePulse(uint32_t now) {
-  if (cfg.v[P_PULSE_OFF] == 0) { pulseOn = true; return; }
-  uint32_t dur = (uint32_t)(pulseOn ? cfg.v[P_PULSE_ON] : cfg.v[P_PULSE_OFF]) * 1000UL;
-  if (now - pulseMs >= dur) {
-    pulseOn = !pulseOn;
-    pulseMs = now;
+// Zwraca true, gdy pompka ma teraz pracowac.
+bool updateDosing(uint32_t now, uint32_t dt) {
+  if (!doseActive && now - cycleStartMs >= intervalMs()) {
+    doseActive = true;
+    cycleStartMs = now;
+    doseRunMs = 0;
+    doseParkBase = readParkCount();
   }
+  if (!doseActive) return false;
+
+  if (v12ok) doseRunMs += dt;  // przy braku 12 V dawka czeka, a nie "przepada"
+
+  if (cfg.v[P_DOSE_MODE] == DM_REVS) {
+    uint16_t revs = readParkCount() - doseParkBase;
+    if (revs >= cfg.v[P_DOSE_REVS]) {
+      doseActive = false;
+      doseCount++;
+      return false;
+    }
+    // silnik pracuje, a krancowka nie daje obrotu = zablokowana pompa / zerwany przewod
+    if (doseRunMs > (uint32_t)(revs + 1) * REV_TIMEOUT_MS) lockout(L_PUMP);
+  } else if (doseRunMs >= (uint32_t)cfg.v[P_DOSE_TIME] * 100UL) {
+    doseActive = false;
+    doseCount++;
+    return false;
+  }
+  return true;
 }
 
 void updateState(uint32_t now, uint32_t dt) {
@@ -448,14 +519,16 @@ void updateState(uint32_t now, uint32_t dt) {
   }
 }
 
-void updatePump(uint32_t now) {
+void updatePump(uint32_t now, uint32_t dt) {
   bool run = false;
   if (priming) {
     run = true;
   } else if (state == ST_IGNITION || state == ST_RUN) {
-    updatePulse(now);
-    run = pulseOn;
+    run = updateDosing(now, dt);
+  } else {
+    doseActive = false;
   }
+  if (state == ST_LOCKOUT) run = priming;
   run = run && v12ok;
 
   if (!run) {
@@ -480,8 +553,21 @@ void updateBuzzer(uint32_t now) {
 // ============================================================================
 //  INTERFEJS
 // ============================================================================
+// krok zalezny od wartosci: drobny przy malych wartosciach, wiekszy przy duzych
+uint8_t autoStep(uint16_t v, bool up) {
+  if (v < 100 || (v == 100 && !up)) return 1;
+  if (v < 300 || (v == 300 && !up)) return 5;
+  return 10;
+}
+
 uint16_t clampStep(uint8_t id, uint16_t val, int8_t delta) {
-  int32_t n = (int32_t)val + (int32_t)delta * pStep(id);
+  int32_t n = val;
+  uint8_t st = pStep(id);
+  if (st) {
+    n += (int32_t)delta * st;
+  } else {
+    for (int8_t i = 0; i < abs(delta); i++) n += delta > 0 ? autoStep(n, true) : -(int16_t)autoStep(n, false);
+  }
   return (uint16_t)constrain(n, (int32_t)pMin(id), (int32_t)pMax(id));
 }
 
@@ -494,8 +580,8 @@ void handleUi(uint32_t now) {
 
   switch (ui) {
     case UI_MAIN:
-      if (d != 0) {  // szybka zmiana mocy z ekranu glownego
-        cfg.v[P_POWER] = clampStep(P_POWER, cfg.v[P_POWER], d);
+      if (d != 0) {  // regulacja interwalu dawkowania z ekranu glownego
+        cfg.v[P_INTERVAL] = clampStep(P_INTERVAL, cfg.v[P_INTERVAL], d);
         quickSavePending = true;
         quickSaveMs = now;
       }
@@ -520,6 +606,8 @@ void handleUi(uint32_t now) {
           ui = UI_EDIT;
         } else if (menuIdx == MENU_PRIME) {
           ui = UI_PRIME;
+        } else if (menuIdx == MENU_INFO) {
+          ui = UI_INFO;
         } else {
           ui = UI_MAIN;
         }
@@ -542,6 +630,10 @@ void handleUi(uint32_t now) {
     case UI_PRIME:
       if (d != 0) ui = UI_MENU;
       break;
+
+    case UI_INFO:
+      if (d != 0 || ev != EV_NONE) ui = UI_MENU;
+      break;
   }
 
   // odpowietrzanie: pompa pracuje tylko gdy przycisk jest trzymany
@@ -559,14 +651,30 @@ void handleUi(uint32_t now) {
   if (menuIdx >= menuTop + 4) menuTop = menuIdx - 3;
 }
 
+void formatFixed(uint16_t val, uint8_t dec, char *buf, size_t len) {
+  if (dec == 1) snprintf_P(buf, len, PSTR("%u.%u"), val / 10, val % 10);
+  else if (dec == 2) snprintf_P(buf, len, PSTR("%u.%02u"), val / 100, val % 100);
+  else snprintf_P(buf, len, PSTR("%u"), val);
+}
+
 void formatValue(uint8_t id, uint16_t val, char *buf, size_t len) {
   if (id == P_FLAME_MODE) {
     snprintf_P(buf, len, PSTR("%S"), FLAME_MODE_NAMES[val]);
-  } else if (id == P_PULSE_OFF && val == 0) {
-    snprintf_P(buf, len, PSTR("ciagle"));
+  } else if (id == P_DOSE_MODE) {
+    snprintf_P(buf, len, PSTR("%S"), DOSE_MODE_NAMES[val]);
+  } else if (id == P_DOSE_ML && val == 0) {
+    snprintf_P(buf, len, PSTR("brak"));
   } else {
-    snprintf_P(buf, len, PSTR("%u%S"), val, pUnit(id));
+    char n[10];
+    formatFixed(val, pDec(id), n, sizeof n);
+    snprintf_P(buf, len, PSTR("%s%S"), n, pUnit(id));
   }
+}
+
+// przeplyw w setnych l/h; 0 gdy dawka nieskalibrowana
+uint16_t flowLph100() {
+  // ml/h = ml_dawki * 3600 / interwal_s  ->  (ml*100) * 36 / (interwal*10) = l/h * 100
+  return (uint16_t)((uint32_t)cfg.v[P_DOSE_ML] * 36UL / cfg.v[P_INTERVAL]);
 }
 
 void formatDuration(uint32_t ms, char *buf, size_t len) {
@@ -613,10 +721,10 @@ void drawLines(const char *title, char lines[][24], uint8_t n, int8_t highlight)
 }
 
 void drawMain(uint32_t now) {
-  char l[4][24];
-  char a[12], b[12];
+  char top[24], big[10], info[24];
 
   if (state == ST_LOCKOUT) {
+    char l[4][24];
     snprintf_P(l[0], 24, PSTR("%S"), LOCK_NAMES[lockReason]);
     snprintf_P(l[1], 24, PSTR("Pompa zatrzymana"));
     snprintf_P(l[2], 24, PSTR("Przytrzymaj przycisk"));
@@ -625,40 +733,81 @@ void drawMain(uint32_t now) {
     return;
   }
 
-  formatV12(a, sizeof a);
-  snprintf_P(l[0], 24, PSTR("YETI:%s 12V:%s"), yetiOn ? "ZAL" : "wyl", v12ok ? a : "brak");
-
-  if (pumpDuty > 0) snprintf_P(l[1], 24, PSTR("Pompa:%u%% PRACUJE"), (unsigned)effectivePower());
-  else if (state != ST_IDLE && !pulseOn) snprintf_P(l[1], 24, PSTR("Pompa:%u%% przerwa"), (unsigned)effectivePower());
-  else snprintf_P(l[1], 24, PSTR("Pompa:%u%% stoi"), (unsigned)effectivePower());
-
+  // gorna linia: stan + plomien
+  char st[12], fl[10];
+  if (state != ST_IDLE && !v12ok) strcpy_P(st, PSTR("BRAK 12V"));
+  else strcpy_P(st, STATE_NAMES[state]);
   switch (cfg.v[P_FLAME_MODE]) {
     case FM_THERMOCOUPLE:
-      if (flueValid) snprintf_P(l[2], 24, PSTR("Plomien:%dC %s"), flueTempC, flamePresent ? "JEST" : "brak");
-      else snprintf_P(l[2], 24, PSTR("Plomien: blad czujn."));
+      if (flueValid) snprintf_P(fl, sizeof fl, PSTR("%dC"), flueTempC);
+      else strcpy_P(fl, PSTR("czujn?"));
       break;
-    case FM_THERMOSTAT:
-      snprintf_P(l[2], 24, PSTR("Plomien(term.): %s"), flamePresent ? "JEST" : "brak");
-      break;
-    default:
-      snprintf_P(l[2], 24, PSTR("Plomien: BEZ KONTROLI"));
-      break;
+    case FM_THERMOSTAT: strcpy_P(fl, flamePresent ? PSTR("plom.OK") : PSTR("plom.--")); break;
+    default:            strcpy_P(fl, PSTR("bez kontr")); break;
   }
+  snprintf_P(top, sizeof top, PSTR("%-11s%9s"), st, fl);
 
+  // duza liczba: interwal
+  uint16_t iv = cfg.v[P_INTERVAL];
+  formatFixed(iv, 1, big, sizeof big);
+
+  // dolna linia
   if (state == ST_IGNITION) {
-    uint32_t left = (uint32_t)cfg.v[P_IGN_TIME] * 60000UL - ignElapsedMs;
-    formatDuration(left, b, sizeof b);
-    snprintf_P(l[3], 24, PSTR("Zaplon zostalo %s"), b);
+    char b[12];
+    uint32_t lim = (uint32_t)cfg.v[P_IGN_TIME] * 60000UL;
+    formatDuration(lim > ignElapsedMs ? lim - ignElapsedMs : 0, b, sizeof b);
+    snprintf_P(info, sizeof info, PSTR("Zaplon: %s"), b);
   } else if (state == ST_RUN && flameLossMs > 0) {
-    snprintf_P(l[3], 24, PSTR("Zanik plom. %lus/%us"), flameLossMs / 1000, cfg.v[P_LOSS_TIME]);
-  } else if (state == ST_RUN) {
-    formatDuration(now - runStartMs, b, sizeof b);
-    snprintf_P(l[3], 24, PSTR("Czas pracy %s"), b);
+    snprintf_P(info, sizeof info, PSTR("Zanik plom. %lus/%us"), flameLossMs / 1000, cfg.v[P_LOSS_TIME]);
   } else {
-    snprintf_P(l[3], 24, PSTR("Klik = menu"));
+    // dawek na minute z jednym miejscem po przecinku: 600 / interwal[0.1s]
+    uint16_t dpm10 = (uint16_t)(6000UL / iv);
+    uint16_t lph = flowLph100();
+    if (lph) snprintf_P(info, sizeof info, PSTR("%u.%u/min %u.%02ul/h"), dpm10 / 10, dpm10 % 10, lph / 100, lph % 100);
+    else snprintf_P(info, sizeof info, PSTR("%u.%u dawek/min"), dpm10 / 10, dpm10 % 10);
   }
 
-  drawLines(STATE_NAMES[state], l, 4, -1);
+  // pasek postepu do nastepnej dawki
+  uint8_t bar = 0;
+  if (state == ST_RUN || state == ST_IGNITION) {
+    uint32_t iMs = intervalMs(), el = now - cycleStartMs;
+    bar = doseActive ? 128 : (uint8_t)(min(el, iMs) * 128UL / iMs);
+  }
+
+  oled.firstPage();
+  do {
+    oled.setFont(u8g2_font_6x10_tr);
+    oled.drawStr(0, 9, top);
+    oled.drawHLine(0, 11, 128);
+    drawStrP(0, 24, PSTR("DAWKA"));
+    drawStrP(0, 35, PSTR("CO"));
+    if (doseActive && pumpDuty > 0) drawStrP(0, 46, PSTR(">>>"));
+    oled.setFont(u8g2_font_logisoso24_tn);
+    uint8_t w = oled.getStrWidth(big);
+    oled.drawStr(112 - w, 44, big);
+    oled.setFont(u8g2_font_7x14B_tr);
+    drawStrP(116, 44, PSTR("s"));
+    oled.setFont(u8g2_font_6x10_tr);
+    oled.drawStr(0, 56, info);
+    oled.drawFrame(0, 59, 128, 5);
+    if (bar) oled.drawBox(0, 59, bar, 5);
+  } while (oled.nextPage());
+}
+
+void drawInfo(uint32_t now) {
+  char l[4][24];
+  char a[12], b[12];
+  formatV12(a, sizeof a);
+  snprintf_P(l[0], 24, PSTR("YETI:%s 12V:%s"), yetiOn ? "ZAL" : "wyl", v12ok ? a : "brak");
+  if (state == ST_RUN) formatDuration(now - runStartMs, b, sizeof b);
+  else strcpy_P(b, PSTR("-"));
+  snprintf_P(l[1], 24, PSTR("Praca: %s"), b);
+  uint32_t ml = doseCount * cfg.v[P_DOSE_ML] / 100;  // ml podane od wlaczenia
+  if (cfg.v[P_DOSE_ML]) snprintf_P(l[2], 24, PSTR("Dawek:%lu %lu.%luL"), doseCount, ml / 1000, (ml / 100) % 10);
+  else snprintf_P(l[2], 24, PSTR("Dawek: %lu"), doseCount);
+  snprintf_P(l[3], 24, PSTR("Krancowka: %S"),
+             digitalRead(PIN_PARK) == PARK_ACTIVE_LEVEL ? PSTR("PARK") : PSTR("-"));
+  drawLines(PSTR("INFORMACJE"), l, 4, -1);
 }
 
 void drawMenu() {
@@ -670,6 +819,8 @@ void drawMenu() {
       formatValue(idx, cfg.v[idx], val, sizeof val);
       snprintf_P(l[i], 24, PSTR("%-11S%9s"), pName(idx), val);
       l[i][20] = '\0';
+    } else if (idx == MENU_INFO) {
+      snprintf_P(l[i], 24, PSTR("Informacje"));
     } else if (idx == MENU_PRIME) {
       snprintf_P(l[i], 24, PSTR("Odpowietrzanie"));
     } else if (idx == MENU_EXIT) {
@@ -718,6 +869,7 @@ void updateDisplay(uint32_t now) {
     case UI_MENU:  drawMenu(); break;
     case UI_EDIT:  drawEdit(); break;
     case UI_PRIME: drawPrime(); break;
+    case UI_INFO:  drawInfo(now); break;
   }
 }
 
@@ -737,6 +889,7 @@ void setup() {
   pinMode(PIN_ENC_SW, INPUT_PULLUP);
   pinMode(PIN_YETI, INPUT_PULLUP);
   pinMode(PIN_FLAME_IN, INPUT_PULLUP);
+  pinMode(PIN_PARK, INPUT_PULLUP);
   pinMode(PIN_TC_CS, OUTPUT);
   digitalWrite(PIN_TC_CS, HIGH);
   pinMode(PIN_TC_SCK, OUTPUT);
@@ -747,8 +900,9 @@ void setup() {
 
   attachInterrupt(digitalPinToInterrupt(PIN_ENC_A), encoderIsr, CHANGE);
   attachInterrupt(digitalPinToInterrupt(PIN_ENC_B), encoderIsr, CHANGE);
-  PCMSK2 |= _BV(PCINT21);  // D5
-  PCICR  |= _BV(PCIE2);
+  PCMSK2 |= _BV(PCINT21);  // D5 - YETI
+  PCMSK0 |= _BV(PCINT0);   // D8 - krancowka
+  PCICR  |= _BV(PCIE2) | _BV(PCIE0);
 
   oled.setBusClock(400000);
   oled.begin();
@@ -777,7 +931,7 @@ void loop() {
   updateFlame(now);
   handleUi(now);
   updateState(now, dt);
-  updatePump(now);
+  updatePump(now, dt);
   updateBuzzer(now);
   updateDisplay(now);
 }

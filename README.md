@@ -7,6 +7,10 @@ do sterowania **pompką oleju** zrobioną z **silnika wycieraczek 12 V** (np. z 
 Sterownik YETI ── wyjście „Dmuchawa” 230 V ──► [moduł wykonawczy] ──► 12 V ──► silnik wycieraczki = pompka oleju
 ```
 
+> **Wersja z mikrokontrolerem:** dawkowanie oleju (interwał ustawiany enkoderem, wyświetlacz OLED,
+> kontrola płomienia, blokady) robi Arduino Nano – opis, schemat i kod w [`firmware/`](firmware/README.md).
+> Ten plik opisuje część 230 V (YETI, przekaźnik, ustawienia YETI, bezpieczeństwo) – obowiązuje dalej.
+
 ---
 
 ## 1. Najważniejsze: wyjście „Dmuchawa” to NIE jest zwykły włącznik 230 V
