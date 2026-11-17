@@ -777,16 +777,11 @@ void drawMain(uint32_t now) {
 
   bool cycling = (state == ST_RUN || state == ST_IGNITION);
 
-  // Ikona 2 (kropla) = dawkowanie: na poczatku kazdej dawki kropla spada i rozpryskuje sie
-  // (klatki 3..7), miedzy dawkami kropla na dyszy "pulsuje" (klatki 0-1-2-1).
+  // Ikona 2 (kropla) = dawkowanie: pelna animacja 8 klatek w petli (kropla rosnie, spada,
+  // rozprysk, fala), 150 ms na klatke - tak jak w podgladzie docs/ikony/ikony_pompy.gif.
   // Bez pracy (YETI wylaczone, blokada) stoi pusta miseczka.
   uint8_t dropF = IKONA_KROPLA_KLATKI - 1;
-  if (cycling) {
-    const uint32_t fall = 5UL * ANIM_STEP_MS;
-    uint32_t el = now - cycleStartMs;
-    static const uint8_t PULSE[4] = {0, 1, 2, 1};
-    dropF = el < fall ? 3 + el / ANIM_STEP_MS : PULSE[(el / 250) % 4];
-  }
+  if (cycling) dropF = (now / 150) % IKONA_KROPLA_KLATKI;
 
   // Ikona 5 (korba) = praca pompy: szybko, gdy silnik podaje olej (10 kl/s),
   // wolno w przerwie miedzy dawkami (3 kl/s), stoi gdy pompa nie pracuje.
