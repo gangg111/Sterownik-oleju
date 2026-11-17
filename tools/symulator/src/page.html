@@ -1,0 +1,214 @@
+<title>Symulator sterownika oleju</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=IBM+Plex+Sans+Condensed:wght@400;500;600;700&display=swap">
+<style>
+  /* Uklad: po lewej "obudowa" sterownika (OLED + enkoder), po prawej pulpit kotlowni
+     z modelami: YETI, pompa, palnik. Na telefonie jedna kolumna. Jeden ciemny wyglad
+     (jak skrzynka w kotlowni), celowo bez wersji jasnej. */
+  :root {
+    --bg: #15181b;
+    --panel: #1d2226;
+    --panel-2: #242a2f;
+    --line: #333b42;
+    --fg: #e7e9eb;
+    --muted: #97a1aa;
+    --accent: #f0a23b;      /* olej / bursztyn */
+    --ok: #5ccf89;
+    --bad: #ff6a55;
+    --oled: #aee6ff;
+    --font-ui: "IBM Plex Sans Condensed", "Roboto Condensed", "Arial Narrow", system-ui, sans-serif;
+    --font-data: "IBM Plex Mono", ui-monospace, "Roboto Mono", Menlo, monospace;
+    color-scheme: dark;
+  }
+  * { box-sizing: border-box; }
+  body {
+    background: var(--bg); color: var(--fg); font: 15px/1.45 var(--font-ui);
+    padding-left: max(16px, env(safe-area-inset-left, 0px));
+    padding-right: max(16px, env(safe-area-inset-right, 0px));
+    padding-block: 20px 32px;
+  }
+  .wrap { max-width: 1080px; margin: 0 auto; display: grid; gap: 20px; }
+  header h1 { margin: 0; font-size: 1.6rem; font-weight: 700; letter-spacing: .01em; text-wrap: balance; }
+  header p { margin: 4px 0 0; color: var(--muted); max-width: 65ch; }
+  .grid { display: grid; grid-template-columns: minmax(0, 1.05fr) minmax(0, 1fr); gap: 20px; align-items: start; }
+  @media (max-width: 820px) { .grid { grid-template-columns: minmax(0, 1fr); } }
+
+  /* ---- obudowa sterownika */
+  .device {
+    background: linear-gradient(180deg, #2a3035, #1f2428); border: 1px solid var(--line);
+    border-radius: 14px; padding: 18px; display: grid; gap: 18px;
+    box-shadow: 0 10px 30px rgba(0,0,0,.35), inset 0 1px 0 rgba(255,255,255,.05);
+  }
+  .bezel { background: #0b0e11; border-radius: 8px; padding: 12px; border: 1px solid #000; }
+  #oled {
+    display: block; width: 100%; height: auto; aspect-ratio: 2 / 1; max-width: 100%;
+    image-rendering: pixelated; image-rendering: crisp-edges;
+    filter: drop-shadow(0 0 3px rgba(174,230,255,.35));
+  }
+  .leds { display: flex; flex-wrap: wrap; gap: 14px; font: 12px var(--font-data); color: var(--muted); text-transform: uppercase; letter-spacing: .06em; }
+  .led { display: inline-flex; align-items: center; gap: 6px; }
+  .led::before { content: ""; width: 10px; height: 10px; border-radius: 50%; background: #3a2a22; box-shadow: inset 0 1px 2px rgba(0,0,0,.6); }
+  .led.on::before { background: var(--accent); box-shadow: 0 0 8px var(--accent); }
+  #led-12v.on::before, #led-blower.on::before { background: var(--ok); box-shadow: 0 0 8px var(--ok); }
+  #led-buzz.on::before { background: var(--bad); box-shadow: 0 0 8px var(--bad); }
+
+  .controls { display: grid; grid-template-columns: auto auto auto; justify-content: center; align-items: center; gap: 18px; }
+  .step {
+    width: 56px; height: 56px; border-radius: 50%; border: 1px solid var(--line); background: var(--panel-2);
+    color: var(--fg); font-size: 22px; cursor: pointer; touch-action: manipulation;
+  }
+  .step:active { background: var(--line); }
+  #knob {
+    position: relative; width: 168px; height: 168px; border-radius: 50%; touch-action: none; cursor: grab;
+    background: radial-gradient(circle at 50% 40%, #3a4148, #1a1e22 70%);
+    border: 1px solid #000; box-shadow: 0 6px 16px rgba(0,0,0,.5), inset 0 2px 0 rgba(255,255,255,.06);
+  }
+  #knob-dial { position: absolute; inset: 0; border-radius: 50%; transition: transform .08s linear; }
+  #knob-dial::before { /* znacznik na pokretle */
+    content: ""; position: absolute; left: 50%; top: 8px; width: 4px; height: 18px; margin-left: -2px;
+    border-radius: 2px; background: var(--accent);
+  }
+  #knob-dial::after { /* radelkowanie */
+    content: ""; position: absolute; inset: 4px; border-radius: 50%;
+    background: repeating-conic-gradient(rgba(255,255,255,.07) 0 4deg, transparent 4deg 12deg);
+    -webkit-mask: radial-gradient(circle, transparent 62%, #000 63%); mask: radial-gradient(circle, transparent 62%, #000 63%);
+  }
+  #enc-btn {
+    position: absolute; left: 50%; top: 50%; width: 84px; height: 84px; margin: -42px 0 0 -42px; border-radius: 50%;
+    border: 1px solid #000; background: radial-gradient(circle at 50% 35%, #4a525a, #262b30);
+    color: var(--muted); font: 600 11px var(--font-ui); letter-spacing: .08em; text-transform: uppercase;
+    cursor: pointer; touch-action: none; user-select: none; -webkit-user-select: none;
+  }
+  #enc-btn.down { background: radial-gradient(circle at 50% 60%, #3a4148, #1e2226); color: var(--accent); }
+  .hint { margin: 0; font-size: 13px; color: var(--muted); text-align: center; }
+  .hint b { color: var(--fg); font-weight: 600; }
+
+  /* ---- pulpit */
+  .panels { display: grid; gap: 14px; }
+  section.card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; display: grid; gap: 12px; }
+  section.card h2 { margin: 0; font-size: 13px; font-weight: 600; text-transform: uppercase; letter-spacing: .1em; color: var(--muted); }
+  .row { display: flex; flex-wrap: wrap; gap: 10px 18px; align-items: center; }
+  .switch { display: inline-flex; align-items: center; gap: 10px; cursor: pointer; user-select: none; }
+  .switch input { appearance: none; -webkit-appearance: none; width: 44px; height: 24px; border-radius: 12px; background: #39424a; position: relative; cursor: pointer; margin: 0; transition: background .15s; }
+  .switch input::after { content: ""; position: absolute; top: 3px; left: 3px; width: 18px; height: 18px; border-radius: 50%; background: #cfd5da; transition: transform .15s; }
+  .switch input:checked { background: var(--accent); }
+  .switch input:checked::after { transform: translateX(20px); background: #fff; }
+  .switch input:focus-visible, button:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .switch.big { font-size: 17px; font-weight: 600; }
+  .switch.danger input:checked { background: var(--bad); }
+
+  .readouts { display: grid; grid-template-columns: repeat(auto-fit, minmax(96px, 1fr)); gap: 10px; }
+  .ro { background: var(--panel-2); border-radius: 8px; padding: 8px 10px; min-width: 0; }
+  .ro span { display: block; font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .07em; }
+  .ro b { font: 600 18px var(--font-data); font-variant-numeric: tabular-nums; }
+  .ro small { color: var(--muted); font: 12px var(--font-data); }
+  label.num { display: inline-flex; align-items: center; gap: 8px; color: var(--muted); }
+  label.num input { width: 76px; padding: 6px 8px; border-radius: 6px; border: 1px solid var(--line); background: var(--panel-2); color: var(--fg); font: 15px var(--font-data); }
+
+  .temp { display: grid; gap: 6px; }
+  .temp-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+  .temp-head b { font: 600 28px var(--font-data); font-variant-numeric: tabular-nums; }
+  #flame-state { font-weight: 600; padding: 2px 10px; border-radius: 999px; background: #39424a; color: var(--muted); }
+  #flame-state[data-state="on"] { background: rgba(240,162,59,.18); color: var(--accent); }
+  .bar { height: 8px; border-radius: 4px; background: var(--panel-2); overflow: hidden; }
+  #temp-bar { height: 100%; width: 0; background: linear-gradient(90deg, #6d7a85, var(--accent) 40%, var(--bad)); }
+  .btn { padding: 8px 14px; border-radius: 8px; border: 1px solid var(--line); background: var(--panel-2); color: var(--fg); font: 600 14px var(--font-ui); cursor: pointer; }
+  .btn:hover { border-color: var(--muted); }
+  .btn.primary { background: var(--accent); color: #1b1408; border-color: var(--accent); }
+  .btn[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
+  .note { margin: 0; color: var(--muted); font-size: 13px; }
+  .note code { font: 12px var(--font-data); color: var(--fg); }
+  footer { color: var(--muted); font-size: 13px; display: grid; gap: 6px; }
+  @media (prefers-reduced-motion: reduce) { #knob-dial { transition: none; } }
+</style>
+
+<div class="wrap">
+  <header>
+    <h1>Symulator sterownika oleju</h1>
+    <p>Emulowany Arduino Nano wykonuje prawdziwy plik firmware (<code>sterownik_oleju.hex</code>).
+      Włącz dmuchawę YETI i reguluj dawkowanie enkoderem tak jak na prawdziwym urządzeniu.</p>
+  </header>
+
+  <div class="grid">
+    <div class="device" aria-label="Sterownik">
+      <div class="bezel"><canvas id="oled" width="128" height="64" aria-label="Wyświetlacz OLED 128 na 64"></canvas></div>
+      <div class="leds">
+        <span class="led" id="led-blower">Dmuchawa</span>
+        <span class="led" id="led-12v">12 V</span>
+        <span class="led" id="led-pump">Pompa</span>
+        <span class="led" id="led-buzz">Alarm</span>
+      </div>
+      <div class="controls">
+        <button class="step" id="enc-left" aria-label="Enkoder w lewo">◀</button>
+        <div id="knob" title="Przeciągnij po okręgu, żeby obrócić">
+          <div id="knob-dial"></div>
+          <button id="enc-btn" aria-label="Przycisk enkodera">Wciśnij</button>
+        </div>
+        <button class="step" id="enc-right" aria-label="Enkoder w prawo">▶</button>
+      </div>
+      <p class="hint"><b>Obrót</b> na ekranie głównym zmienia interwał dawki · <b>klik</b> = menu / zapisz ·
+        <b>przytrzymaj 1,5 s</b> = anuluj, kasuj blokadę</p>
+    </div>
+
+    <div class="panels">
+      <section class="card" aria-labelledby="h-yeti">
+        <h2 id="h-yeti">Kocioł · YETI</h2>
+        <label class="switch big"><input type="checkbox" id="sw-blower"> Dmuchawa załączona</label>
+        <div class="row">
+          <label class="switch danger"><input type="checkbox" id="sw-stb"> STB zadziałał (brak 12 V)</label>
+          <label class="switch danger"><input type="checkbox" id="sw-weld"> Sklejony przekaźnik</label>
+        </div>
+      </section>
+
+      <section class="card" aria-labelledby="h-pump">
+        <h2 id="h-pump">Pompa · silnik wycieraczki</h2>
+        <div class="readouts">
+          <div class="ro"><span>PWM</span><b id="v-duty">0 %</b></div>
+          <div class="ro"><span>Obroty</span><b id="v-rpm">0</b> <small>obr/min</small></div>
+          <div class="ro"><span>Obrotów</span><b id="v-revs">0</b></div>
+          <div class="ro"><span>Podano</span><b id="v-oil">0</b> <small>ml</small></div>
+          <div class="ro"><span>Przepływ</span><b id="v-flow">0</b> <small>l/h</small></div>
+          <div class="ro"><span>Krańcówka</span><b id="v-park">—</b></div>
+        </div>
+        <div class="row">
+          <label class="num">Wydajność <input id="ml-rev" type="number" min="0.5" max="50" step="0.5" value="10"> ml/obrót</label>
+          <label class="switch danger"><input type="checkbox" id="sw-jam"> Pompa zablokowana</label>
+        </div>
+      </section>
+
+      <section class="card" aria-labelledby="h-burner">
+        <h2 id="h-burner">Palnik · termopara</h2>
+        <div class="temp">
+          <div class="temp-head"><span><b id="v-temp">20</b> °C</span><span id="flame-state" data-state="off">zgaszony</span></div>
+          <div class="bar"><div id="temp-bar"></div></div>
+        </div>
+        <div class="row">
+          <button class="btn primary" id="btn-ignite">Zapal</button>
+          <button class="btn" id="btn-out">Zgaś płomień</button>
+          <label class="switch danger"><input type="checkbox" id="sw-tc"> Termopara odłączona</label>
+        </div>
+        <p class="note">Płomień zapala się sam po kilku sekundach podawania oleju, a gaśnie po 45 s bez oleju.
+          Żeby sterownik go pilnował, ustaw w menu <code>Czujnik pl.</code> na <code>termopara</code>
+          (albo <code>termostat</code>, wtedy zwiera powyżej 60 °C).</p>
+      </section>
+    </div>
+  </div>
+
+  <footer>
+    <div class="row">
+      <span>Czas symulacji <b id="v-time">00:00:00</b></span>
+      <span>Szybkość <b id="v-speed">100 %</b></span>
+      <span>Zasilanie pompy <b id="v-12v">0 V</b></span>
+    </div>
+    <div class="row">
+      <button class="btn" id="btn-reset">Restart Arduino</button>
+      <button class="btn" id="btn-eeprom">Wyczyść EEPROM</button>
+      <button class="btn" id="btn-sound" aria-pressed="false">Dźwięk alarmu</button>
+    </div>
+    <p class="note" id="eeprom-note">Ustawienia z menu zapisują się w tej przeglądarce, tak jak w EEPROM sterownika.</p>
+  </footer>
+</div>
+
+<script>window.FIRMWARE_HEX = `/*__HEX__*/`;</script>
+<script>/*__APP__*/</script>
