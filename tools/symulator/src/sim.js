@@ -120,6 +120,7 @@ export class Simulator {
     const origReset = cpu.reset.bind(cpu);
     cpu.reset = () => {
       origReset();
+      cpu.onWatchdogReset();  // nowy odcinek czasu watchdoga (jak w procesorze po resecie)
       cpu.data[2] = 0x08;
       for (const a of [0x24, 0x25, 0x27, 0x28, 0x2a, 0x2b]) cpu.data[a] = 0;  // DDRx/PORTx
       cpu.data[0x80] = 0; cpu.data[0x81] = 0;                               // TCCR1A/B
@@ -130,7 +131,9 @@ export class Simulator {
     this.timeMs = 0;
     this.blower = false;      // YETI zalacza wyjscie "Dmuchawa"
     this.stbOk = true;        // STB / bezpiecznik 12 V
-    this.relayWelded = false; // sklejony styk przekaznika
+    this.relayWelded = false; // sklejony styk przekaznika YETI
+    this.safetyWelded = false; // sklejony styk przekaznika bezpieczenstwa
+    this.mosfetShort = false;  // zwarty tranzystor klucza pompy
     this.encQueue = [];
     this.button = false;
 
@@ -181,6 +184,12 @@ export class Simulator {
   setButton(down) { this.button = down; }
 
   get v12() { return (this.blower && this.stbOk) || this.relayWelded; }
+  get safetyClosed() { return this.safetyWelded || this.portC.pinState(2) === PinState.High; }
+  get motorSupply() { return this.v12 && this.safetyClosed; }
+  hang() {  // zawieszenie programu: petla bez konca (rjmp .-2) w nieuzywanej czesci pamieci
+    this.cpu.progMem[0x3e00] = 0xcfff;
+    this.cpu.pc = 0x3e00;
+  }
   get buzzer() { return this.portD.pinState(7) === PinState.High; }
   get flowLph() {
     let s = 0;
@@ -213,6 +222,9 @@ export class Simulator {
     this.portD.setPin(6, !(this.temp > 60));                 // termostat spalin NO: zwarty = goraco
     this.portB.setPin(0, !((this.angle % 360) < 20));          // krancowka: LOW w pozycji parkowania
     this.adc.channelValues[0] = this.v12 ? 12.6 * 3.3 / 13.3 : 0.02;
+    // napiecie na silniku (za kluczem): zasilanie * wypelnienie PWM albo SEM wybiegu silnika
+    const vm = this.duty > 0 ? 12.6 * this.duty : 12.6 * 0.8 * (this.rpm / this.rpmMax);
+    this.adc.channelValues[6] = vm * 3.3 / 13.3;
 
     const cpu = this.cpu;
     const end = cpu.cycles + CYCLES_PER_MS;
@@ -221,8 +233,9 @@ export class Simulator {
       cpu.tick();
     }
 
-    // silnik + pompa
-    this.duty = this.v12 ? this.readDuty() : 0;
+    // silnik + pompa: 12 V -> przekaznik YETI -> przekaznik bezpieczenstwa -> klucz -> silnik
+    const cmd = this.mosfetShort ? 1 : this.readDuty();
+    this.duty = this.motorSupply ? cmd : 0;
     const target = this.jammed || this.duty < 0.15 ? 0 : this.rpmMax * this.duty;
     this.rpm += (target - this.rpm) * 0.05;                   // bezwladnosc ~20 ms
     if (target === 0 && this.rpm < 1) this.rpm = 0;

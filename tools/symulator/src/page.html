@@ -98,6 +98,8 @@
   .switch.big { font-size: 17px; font-weight: 600; }
   .switch.danger input:checked { background: var(--bad); }
 
+  .faults { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 10px 18px; }
+  #led-safety.on::before { background: var(--ok); box-shadow: 0 0 8px var(--ok); }
   .readouts { display: grid; grid-template-columns: repeat(auto-fit, minmax(96px, 1fr)); gap: 10px; }
   .ro { background: var(--panel-2); border-radius: 8px; padding: 8px 10px; min-width: 0; }
   .ro span { display: block; font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .07em; }
@@ -136,6 +138,7 @@
       <div class="leds">
         <span class="led" id="led-blower">Dmuchawa</span>
         <span class="led" id="led-12v">12 V</span>
+        <span class="led" id="led-safety">Bezp.</span>
         <span class="led" id="led-pump">Pompa</span>
         <span class="led" id="led-buzz">Alarm</span>
       </div>
@@ -155,10 +158,6 @@
       <section class="card" aria-labelledby="h-yeti">
         <h2 id="h-yeti">Kocioł · YETI</h2>
         <label class="switch big"><input type="checkbox" id="sw-blower"> Dmuchawa załączona</label>
-        <div class="row">
-          <label class="switch danger"><input type="checkbox" id="sw-stb"> STB zadziałał (brak 12 V)</label>
-          <label class="switch danger"><input type="checkbox" id="sw-weld"> Sklejony przekaźnik</label>
-        </div>
       </section>
 
       <section class="card" aria-labelledby="h-pump">
@@ -173,7 +172,6 @@
         </div>
         <div class="row">
           <label class="num">Wydajność <input id="ml-rev" type="number" min="0.5" max="50" step="0.5" value="10"> ml/obrót</label>
-          <label class="switch danger"><input type="checkbox" id="sw-jam"> Pompa zablokowana</label>
         </div>
       </section>
 
@@ -186,11 +184,28 @@
         <div class="row">
           <button class="btn primary" id="btn-ignite">Zapal</button>
           <button class="btn" id="btn-out">Zgaś płomień</button>
-          <label class="switch danger"><input type="checkbox" id="sw-tc"> Termopara odłączona</label>
         </div>
         <p class="note">Płomień zapala się sam po kilku sekundach podawania oleju, a gaśnie po 45 s bez oleju.
           Żeby sterownik go pilnował, ustaw w menu <code>Czujnik pl.</code> na <code>termopara</code>
           (albo <code>termostat</code>, wtedy zwiera powyżej 60 °C).</p>
+      </section>
+      <section class="card" aria-labelledby="h-fault">
+        <h2 id="h-fault">Usterki · test zabezpieczeń</h2>
+        <div class="faults">
+          <label class="switch danger"><input type="checkbox" id="sw-stb"> STB zadziałał (brak 12 V)</label>
+          <label class="switch danger"><input type="checkbox" id="sw-weld"> Sklejony przekaźnik YETI</label>
+          <label class="switch danger"><input type="checkbox" id="sw-sweld"> Sklejony przekaźnik bezpieczeństwa</label>
+          <label class="switch danger"><input type="checkbox" id="sw-short"> Zwarty tranzystor pompy</label>
+          <label class="switch danger"><input type="checkbox" id="sw-jam"> Pompa zablokowana</label>
+          <label class="switch danger"><input type="checkbox" id="sw-tc"> Termopara odłączona</label>
+        </div>
+        <div class="row">
+          <button class="btn" id="btn-hang">Zawieś Arduino</button>
+          <span class="note" id="hang-note">Restartów watchdoga: <b id="v-wdt">0</b></span>
+        </div>
+        <p class="note">Sklejony przekaźnik bezpieczeństwa wykrywa test przy każdym uruchomieniu pompy.
+          Zwarty tranzystor: sterownik otwiera przekaźnik bezpieczeństwa i blokuje się.
+          Zawieszenie: watchdog restartuje Arduino po 0,25 s, trzy z rzędu dają blokadę.</p>
       </section>
     </div>
   </div>

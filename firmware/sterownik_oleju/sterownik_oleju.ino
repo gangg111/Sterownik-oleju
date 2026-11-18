@@ -41,7 +41,9 @@
 #define V12_PRESENT          8.0f   // [V] powyzej = 12 V za przekaznikiem jest
 #define CHECK_RELAY          1      // 1 = blokada gdy 12 V jest, a YETI nie zalacza
 #define BUZZER_ACTIVE_HIGH   1
-#define PARK_ACTIVE_LEVEL    LOW    // stan pinu krancowki w pozycji parkowania
+#define PARK_ACTIVE_LEVEL    LOW
+#define SAFETY_ACTIVE_HIGH   1      // przekaznik bezpieczenstwa: 1 = zalaczany stanem wysokim
+#define V_MOTOR_ON           6.0f   // [V] powyzej = na silniku jest napiecie    // stan pinu krancowki w pozycji parkowania
 
 // Piny
 const uint8_t PIN_ENC_A    = 2;   // INT0
@@ -55,7 +57,9 @@ const uint8_t PIN_PUMP     = 9;   // OC1A -> NPN -> bramka P-MOSFET (HIGH = pomp
 const uint8_t PIN_TC_CS    = 10;  // MAX6675 CS
 const uint8_t PIN_TC_SO    = 12;  // MAX6675 SO
 const uint8_t PIN_TC_SCK   = 13;  // MAX6675 SCK
-const uint8_t PIN_VSENSE   = A0;  // dzielnik z +12 V (za przekaznikiem)
+const uint8_t PIN_VSENSE   = A0;  // dzielnik z +12 V (za przekaznikiem YETI)
+const uint8_t PIN_SAFETY   = A2;  // przekaznik bezpieczenstwa (w szereg z kluczem pompy)
+const uint8_t PIN_MSENSE   = A6;  // dzielnik z wyjscia klucza (napiecie na silniku)
 // OLED: A4 = SDA, A5 = SCL
 
 // Stale czasowe
@@ -152,10 +156,11 @@ enum State : uint8_t { ST_IDLE, ST_IGNITION, ST_RUN, ST_LOCKOUT };
 const char STATE_NAMES[][11] PROGMEM = {"CZUWANIE", "ROZPALANIE", "PRACA", "BLOKADA"};
 
 enum LockReason : uint8_t {
-  L_NONE, L_NO_IGNITION, L_FLAME_LOSS, L_SENSOR, L_RELAY, L_PUMP, L_WATCHDOG, L_PUMP_TIME, L_COUNT
+  L_NONE, L_NO_IGNITION, L_FLAME_LOSS, L_SENSOR, L_RELAY, L_PUMP, L_WATCHDOG, L_PUMP_TIME, L_MOSFET, L_SAFETY, L_COUNT
 };
 const char LOCK_NAMES[][16] PROGMEM = {"", "Brak zaplonu", "Zanik plomienia", "Blad czujnika", "Przekaznik/12V",
-                                       "Pompa/krancowka", "Restarty MCU", "Pompa za dlugo"};
+                                       "Pompa/krancowka", "Restarty MCU", "Pompa za dlugo",
+                                       "Klucz zwarty", "Przek. bezp."};
 
 // ============================================================================
 //  ODPORNOSC NA ZAWIESZENIA
@@ -381,7 +386,15 @@ void updateYeti(uint32_t now) {
   }
 }
 
+float vMotor = 0.0f;
+
+float readMotorVolts() {
+  return analogRead(PIN_MSENSE) * (5.0f / 1023.0f) * VSENSE_RATIO;
+}
+
+
 void updateVoltage() {
+  vMotor += (readMotorVolts() - vMotor) * 0.3f;
   float raw = analogRead(PIN_VSENSE) * (5.0f / 1023.0f) * VSENSE_RATIO;
   v12 += (raw - v12) * 0.2f;
   v12ok = v12 > V12_PRESENT;
@@ -562,16 +575,92 @@ void updateState(uint32_t now, uint32_t dt) {
   }
 }
 
+// ============================================================================
+//  DRUGI KANAL BEZPIECZENSTWA
+//  12 V do silnika idzie przez: przekaznik YETI -> PRZEKAZNIK BEZPIECZENSTWA -> klucz (MOSFET).
+//  - Przekaznik bezpieczenstwa jest zamkniety tylko w pracy, bez blokady i po udanym tescie.
+//    Zawieszenie/reset Arduino = pin w stanie wysokiej impedancji = przekaznik otwarty.
+//  - Test przed kazdym uruchomieniem: przekaznik otwarty, klucz na chwile zalaczony -> na silniku
+//    musi byc 0 V. Napiecie = sklejony styk przekaznika -> blokada (pompa nie ruszy).
+//  - W pracy: klucz wylaczony, a na silniku napiecie = zwarty tranzystor -> otwarcie przekaznika
+//    i blokada. Najczestsza awaria tranzystora (zwarcie) nie konczy sie ciaglym podawaniem oleju.
+// ============================================================================
+bool     safetyOn = false, safetyTested = false;
+uint32_t mosfetFaultMs = 0;
+
+void setSafety(bool on) {
+  safetyOn = on;
+  digitalWrite(PIN_SAFETY, (on == (bool)SAFETY_ACTIVE_HIGH) ? HIGH : LOW);
+}
+
+
+// Test styku przekaznika bezpieczenstwa (blokujacy, ~250 ms, z karmieniem watchdoga):
+// przekaznik otwarty, klucz zalaczony -> na silniku musi byc 0 V.
+bool safetyRelayTest() {
+  setSafety(false);
+  setPumpDuty(0);
+  delay(60);                       // czas na odpadniecie styku
+  wdt_reset();
+  setPumpDuty(100);
+  delay(60);
+  float vmax = 0;
+  for (uint8_t i = 0; i < 8; i++) {  // 8 pomiarow w ciagu ~40 ms
+    float v = readMotorVolts();
+    if (v > vmax) vmax = v;
+    delay(5);
+  }
+  setPumpDuty(0);
+  wdt_reset();
+  delay(60);                       // wybieg silnika, gdyby jednak ruszyl
+  wdt_reset();
+  vMotor = 0;
+  return vmax < V_MOTOR_ON;
+}
+
+// true = kanal bezpieczenstwa pozwala na prace pompy; w trakcie testu sam steruje kluczem
+bool updateSafety(uint32_t now, uint32_t dt, bool wantPower) {
+  (void)now;
+  if (lockReason != L_NONE || !wantPower) {
+    setSafety(false);
+    safetyTested = false;
+    mosfetFaultMs = 0;
+    return false;
+  }
+  if (!safetyTested) {
+    setSafety(false);
+    setPumpDuty(0);
+    if (!v12ok) return false;                 // test tylko przy obecnym 12 V
+    if (!safetyRelayTest()) { lockout(L_SAFETY); return false; }
+    safetyTested = true;
+    setSafety(true);
+    return false;                             // pompa od nastepnego obiegu petli
+  }
+  setSafety(true);
+  if (pumpDuty == 0 && vMotor > V_MOTOR_ON) {
+    mosfetFaultMs += dt;
+    if (mosfetFaultMs >= 300) { setSafety(false); lockout(L_MOSFET); return false; }
+  } else {
+    mosfetFaultMs = 0;
+  }
+  return true;
+}
+
 void updatePump(uint32_t now, uint32_t dt) {
+  bool cycling = state == ST_IGNITION || state == ST_RUN;
+  if (!updateSafety(now, dt, cycling || ui == UI_PRIME)) {
+    setPumpDuty(0);
+    pumpWasOn = false;
+    doseActive = false;
+    return;
+  }
   bool run = false;
   if (priming) {
     run = true;
-  } else if (state == ST_IGNITION || state == ST_RUN) {
+  } else if (cycling) {
     run = updateDosing(now, dt);
   } else {
     doseActive = false;
   }
-  if (state == ST_LOCKOUT) run = priming;
   run = run && v12ok;
 
   if (!run) {
@@ -968,6 +1057,8 @@ void updateDisplay(uint32_t now) {
 // ============================================================================
 void setup() {
   pumpPwmInit();  // najpierw: pompa na pewno wylaczona
+  pinMode(PIN_SAFETY, OUTPUT);
+  setSafety(false);
   // Watchdog od samego poczatku (takze inicjalizacja ekranu moze sie zawiesic), z krotkim
   // czasem 250 ms: przy zawieszeniu w trakcie dawki pompa pracuje najwyzej 0,25 s dluzej,
   // bo reset procesora ustawia piny jako wejscia, a rezystor 10k zamyka klucz pompy.

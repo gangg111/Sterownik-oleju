@@ -108,15 +108,18 @@ function applyControls() {
   sim.blower = $('sw-blower').checked;
   sim.stbOk = !$('sw-stb').checked;
   sim.relayWelded = $('sw-weld').checked;
+  sim.safetyWelded = $('sw-sweld').checked;
+  sim.mosfetShort = $('sw-short').checked;
   sim.jammed = $('sw-jam').checked;
   sim.tcOpen = $('sw-tc').checked;
   const ml = parseFloat($('ml-rev').value);
   if (ml > 0) sim.mlPerRev = ml;
 }
-for (const id of ['sw-blower', 'sw-stb', 'sw-weld', 'sw-jam', 'sw-tc', 'ml-rev']) {
+for (const id of ['sw-blower', 'sw-stb', 'sw-weld', 'sw-sweld', 'sw-short', 'sw-jam', 'sw-tc', 'ml-rev']) {
   $(id).addEventListener('change', applyControls);
   $(id).addEventListener('input', applyControls);
 }
+$('btn-hang').addEventListener('click', () => sim.hang());
 $('btn-ignite').addEventListener('click', () => sim.ignite());
 $('btn-out').addEventListener('click', () => sim.extinguish());
 $('btn-reset').addEventListener('click', () => { boot(sim.eepromBackend.memory.slice()); });
@@ -146,6 +149,8 @@ function updatePanel(speed) {
   $('led-pump').classList.toggle('on', pumpOn);
   $('led-buzz').classList.toggle('on', sim.buzzer);
   $('led-12v').classList.toggle('on', sim.v12);
+  $('led-safety').classList.toggle('on', sim.safetyClosed);
+  $('v-wdt').textContent = sim.wdtResets;
   $('led-blower').classList.toggle('on', sim.blower);
   if (osc) osc.gainNode.gain.value = sim.buzzer ? 0.05 : 0;
 
@@ -162,7 +167,7 @@ function updatePanel(speed) {
   $('v-park').textContent = (sim.angle % 360) < 20 ? 'PARK' : '—';
   $('v-time').textContent = new Date(sim.timeMs).toISOString().substr(11, 8);
   $('v-speed').textContent = fmt(speed * 100) + ' %';
-  $('v-12v').textContent = sim.v12 ? '12,6 V' : '0 V';
+  $('v-12v').textContent = sim.motorSupply ? '12,6 V' : '0 V';
 }
 
 // ---------------------------------------------------------------------------

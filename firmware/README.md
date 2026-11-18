@@ -64,23 +64,40 @@ na ekranie głównym (pierwszy klik wycisza buzzer). Blokada przetrwa wyłączen
                             │
                      [bezpiecznik 10 A]
                             │
-                styk NO przekaźnika 230 V (cewka ← YETI „Dmuchawa” przez STB 95°C)
+   KANAŁ 1 (YETI):  styk NO przekaźnika 230 V (cewka ← YETI „Dmuchawa” przez STB 95°C)
                             │
-            +12V_SW ────────┼──────────────────┬──────────────┐
+            +12V_SW ────────┼──────────────────────────── A0: dzielnik 10k/3,3k (pomiar 12 V)
+                            │
+   KANAŁ 2 (Arduino): styk NO przekaźnika samochodowego 12 V 30 A
+                            │      cewka: +12 V ─ cewka ─ C BC547 E ─ GND, dioda 1N4148 na cewce,
+                            │             baza ← A2 przez 1k, 10k baza–emiter
+            +12V_SAFE ──────┼──────────────────┬──────────────┐
                             │                  │              │
                          S  │                [1k]          [10k]
                      IRF4905 (P-MOSFET)        │              │
-                         G ─┼──────────────────┤             A0 ── [3.3k] ── GND
-                         D  │                  │C
-                            │               BC547            (pomiar 12 V)
+                         G ─┼──────────────────┤          (nic – źródło
+                         D  │                  │C           klucza)
+                            │               BC547
                             │                  │E
                             │      D9 ─[1k]─ B │
                             │                 GND   (10k B–E)
                             │
-          SR560 (K) ────────┤ MOTOR+  → silnik wycieraczki, zacisk 53 (bieg wolny)
-          SR560 (A) ── GND    MOTOR−  → zacisk 31 / obudowa → GND
+          SR560 (K) ────────┤ MOTOR+ ──┬──► silnik wycieraczki, zacisk 53 (bieg wolny)
+          SR560 (A) ── GND             └──► A6: dzielnik 10k/3,3k (napięcie na silniku)
+                              MOTOR−  → zacisk 31 / obudowa → GND
                               park 31b → [1k] → D8   (53a NIE podłączać)
 ```
+
+**Trzy niezależne odcięcia w szeregu:** przekaźnik YETI (sprzęt, z STB) → przekaźnik bezpieczeństwa
+(Arduino) → tranzystor (Arduino, dawki). Pompa dostaje prąd tylko, gdy wszystkie trzy są zamknięte.
+
+- **Zawieszone Arduino:** watchdog → reset → piny A2 i D9 jako wejścia → oba BC547 zatkane (10 kΩ B–E)
+  → przekaźnik bezpieczeństwa i tranzystor otwarte.
+- **Zwarty tranzystor** (najczęstsza awaria MOSFET-a): Arduino widzi na A6 napięcie, choć pompa ma stać
+  → po 0,3 s otwiera przekaźnik bezpieczeństwa i blokuje się („Klucz zwarty”).
+- **Sklejony styk przekaźnika bezpieczeństwa:** przy każdym uruchomieniu pompy test – przekaźnik otwarty,
+  tranzystor na chwilę załączony, na silniku musi być 0 V. Napięcie → blokada („Przek. bezp.”).
+- **Sklejony przekaźnik YETI:** 12 V przy wyłączonym YETI → blokada („Przekaznik/12V”).
 
 **Dlaczego klucz od strony plusa (high-side)?** W silniku wycieraczki obudowa = masa (31),
 a krańcówka parkowania zwiera się właśnie do obudowy. Przy kluczu od strony masy obudowa „wisiałaby”
@@ -97,6 +114,8 @@ i krańcówki nie dałoby się odczytać. Przy okazji obudowa przykręcona do ko
 | D7 | buzzer aktywny 5 V |
 | D8 | krańcówka wycieraczki 31b (przez 1 kΩ, + 100 nF do GND) |
 | D9 | → 1 kΩ → baza BC547 (klucz pompki) |
+| A2 | → 1 kΩ → baza BC547 przekaźnika bezpieczeństwa |
+| A6 | dzielnik 10 kΩ / 3,3 kΩ z wyjścia klucza (napięcie na silniku) |
 | D10, D12, D13 | MAX6675: CS, SO, SCK (opcjonalnie) |
 | A0 | dzielnik 10 kΩ / 3,3 kΩ z +12V_SW |
 | A4, A5 | OLED SDA, SCL |
@@ -131,7 +150,8 @@ Zapisz wynik (np. „pin 1 = 31, pin 3 = 53, pin 5 = 31b”) – przydaje się p
 | Enkoder KY-040 | jeśli przeskakuje o 2 – `ENC_STEPS_PER_DETENT 2` |
 | Moduł transoptora 230 V AC (1 kanał) | wejście równolegle do cewki przekaźnika |
 | Przekaźnik z cewką 230 V AC, styk ≥ 10 A | twarde odcięcie 12 V niezależne od Arduino |
-| IRF4905 (P-MOSFET) na radiatorze, BC547, rezystory 1k ×3, 10k ×2, 3.3k | klucz pompki |
+| IRF4905 (P-MOSFET) na radiatorze, BC547 ×2, rezystory 1k ×4, 10k ×4, 3.3k ×2, dioda 1N4148 | klucz pompki, sterowanie przekaźnika bezpieczeństwa, pomiary |
+| Przekaźnik samochodowy 12 V 30 A + gniazdo | przekaźnik bezpieczeństwa (drugi kanał odcięcia) |
 | Dioda Schottky SR560 / SB560 | równolegle do silnika (gaszenie przepięć) |
 | Przetwornica 12 V → 5 V | zasilanie Arduino |
 | (opcja) MAX6675 + termopara K | kontrola płomienia – termopara blisko płomienia, nie w kominie |

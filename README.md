@@ -176,3 +176,25 @@ zawór iglicowy mosiężny 1/4" BSP + 2 króćce 1/4" → wąż, filtr paliwa (c
 
 **Regulacja:** zaworek zgrubnie (raz), enkoder (interwał) na bieżąco. Gęstość przepracowanego oleju
 mocno zależy od temperatury – zaworek ustawiaj, gdy olej ma temperaturę pracy.
+
+---
+
+## 8. Zasada bezpieczeństwa: Arduino nie może być jedynym zabezpieczeniem
+
+Sterownik na Arduino to **urządzenie domowej roboty, bez certyfikatu**. Firmware ma watchdoga, blokady
+i drugi kanał odcięcia (szczegóły w `firmware/README.md`), ale założenie projektu jest takie:
+**każda awaria Arduino – zawieszenie, uszkodzenie, zły program – ma kończyć się zatrzymaniem oleju,
+a pożar i przegrzanie zatrzymują elementy mechaniczne, które w ogóle nie zależą od elektroniki.**
+
+| Zagrożenie | Zabezpieczenie niezależne od Arduino |
+|---|---|
+| Przegrzanie bojlera | **STB 95 °C z ręcznym resetem** w szereg z cewką przekaźnika YETI |
+| Pożar przy palniku / wyciek oleju | **zawór termiczny (przeciwpożarowy) na przewodzie oleju** przy palniku – zamyka się mechanicznie przy ~70–95 °C |
+| Olej podawany bez płomienia | najlepiej **automat palnikowy z fotokomórką** (np. używany LOA24 / Satronic + czujnik QRB) w szereg z zasilaniem pompy; Arduino z termoparą jest drugim, nie jedynym strażnikiem |
+| Porażenie / zwarcie 230 V | **wyłącznik różnicowoprądowy 30 mA**, gniazdo z uziemieniem, obudowa z PE |
+| Czad | **czujnik CO** z głośnym alarmem w garażu |
+| Rozlany olej | wanna/taca pod zbiornikiem i palnikiem, zbiornik ≥ 1 m od pieca |
+| Gaszenie | **gaśnica proszkowa lub śniegowa** przy wyjściu |
+
+Dopóki nie ma STB, czujnika CO i gaśnicy – **nie uruchamiać**. Dopóki układ nie przejdzie wielu pełnych cykli
+pod nadzorem (rozpalenie → praca → wygaszenie → zanik płomienia → blokada) – **nie zostawiać bez nadzoru**.
