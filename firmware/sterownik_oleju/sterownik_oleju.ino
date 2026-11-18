@@ -76,6 +76,10 @@ const uint8_t  FLAME_HYST_C       = 10;
 const uint32_t UI_TIMEOUT_MS      = 60000;
 const uint32_t PRIME_MAX_MS       = 60000;
 const uint16_t QUICK_SAVE_MS      = 3000;
+const uint8_t  LW                 = 40;    // bufor linii tekstu (pelne nazwy, bez skrotow)
+const uint8_t  LINE_CHARS         = 21;    // tyle znakow 6 px miesci sie w linii ekranu
+const uint16_t MARQUEE_STEP_MS    = 300;   // przesuw napisu o 1 znak
+const uint16_t MARQUEE_PAUSE_MS   = 1200;  // postoj na poczatku i na koncu napisu
 const uint32_t STABLE_MS          = 600000UL; // 10 min pracy bez restartu = licznik zawieszen zerowany
 const uint8_t  WDT_STREAK_LIMIT   = 3;     // tyle restartow watchdoga z rzedu = blokada
 const uint32_t PUMP_MAX_ON_MS     = 32000; // dluzej niz najdluzsza dawka (30 s) = blad logiki
@@ -99,7 +103,7 @@ enum ParamId : uint8_t {
 
 // Napisy trzymane we Flash (PROGMEM) - ATmega328P ma tylko 2 KB RAM
 struct ParamDef {
-  char name[12];
+  char name[29];      // pelna nazwa (bez skrotow); za dluga przesuwa sie na ekranie
   uint16_t minV, maxV;
   uint8_t  step;      // 0 = krok zalezny od wartosci (1 / 5 / 10)
   uint8_t  dec;       // miejsca po przecinku przy wyswietlaniu
@@ -109,18 +113,19 @@ struct ParamDef {
 
 const ParamDef PARAMS[P_COUNT] PROGMEM = {
   // nazwa         min   max  krok dec domysl. jedn.
-  {"Interwal",       5, 1200,   0,  1,   60, "s"},    // 0.5 .. 120.0 s
-  {"Tryb dawki",     0,    1,   1,  0,    0, ""},     // czas / obroty
-  {"Czas dawki",     1,  300,   0,  1,    5, "s"},    // 0.1 .. 30.0 s
-  {"Obroty/daw.",    1,   20,   1,  0,    1, "obr"},
-  {"ml/dawke",       0, 2000,   0,  2,    0, "ml"},   // 0 = nie skalibrowano
-  {"Kontr.obrot",    0,    1,   1,  0,    1, ""},     // krancowka pilnuje, czy pompa sie kreci
-  {"Moc pompy",     20,  100,   5,  0,  100, "%"},
-  {"Kopniecie",      0, 2000, 100,  0,  200, "ms"},
-  {"Czujnik pl.",    0,    2,   1,  0,    2, ""},     // domyslnie termopara: brak czujnika = blokada
-  {"Prog plom.",    40,  600,   5,  0,  120, "C"},
-  {"Czas zapl.",     1,   30,   1,  0,    5, "min"},
-  {"Zanik plom.",    5,  300,   5,  0,   60, "s"},
+  // nazwa                           min   max  krok dec domysl. jedn.
+  {"Interwal dawek",                   5, 1200,   0,  1,   60, "s"},    // 0.5 .. 120.0 s
+  {"Tryb dawkowania",                  0,    1,   1,  0,    0, ""},     // czas / obroty
+  {"Czas jednej dawki",                1,  300,   0,  1,    5, "s"},    // 0.1 .. 30.0 s
+  {"Obroty na jedna dawke",            1,   20,   1,  0,    1, "obr"},
+  {"Ilosc oleju w jednej dawce",       0, 2000,   0,  2,    0, "ml"},   // 0 = nie skalibrowano
+  {"Kontrola obrotu pompy",            0,    1,   1,  0,    1, ""},     // krancowka pilnuje obrotu
+  {"Moc pompy",                       20,  100,   5,  0,  100, "%"},
+  {"Kopniecie przy starcie",           0, 2000, 100,  0,  200, "ms"},
+  {"Czujnik plomienia",                0,    2,   1,  0,    2, ""},     // domyslnie termopara
+  {"Prog temperatury plomienia",      40,  600,   5,  0,  120, "C"},
+  {"Czas na zaplon",                   1,   30,   1,  0,    5, "min"},
+  {"Dopuszczalny zanik plomienia",     5,  300,   5,  0,   60, "s"},
 };
 
 enum FlameMode : uint8_t { FM_NONE, FM_THERMOSTAT, FM_THERMOCOUPLE };
@@ -160,9 +165,17 @@ const char STATE_NAMES[][11] PROGMEM = {"CZUWANIE", "ROZPALANIE", "PRACA", "BLOK
 enum LockReason : uint8_t {
   L_NONE, L_NO_IGNITION, L_FLAME_LOSS, L_SENSOR, L_RELAY, L_PUMP, L_WATCHDOG, L_PUMP_TIME, L_MOSFET, L_SAFETY, L_COUNT
 };
-const char LOCK_NAMES[][16] PROGMEM = {"", "Brak zaplonu", "Zanik plomienia", "Blad czujnika", "Przekaznik/12V",
-                                       "Pompa zablok.", "Restarty MCU", "Pompa za dlugo",
-                                       "Klucz zwarty", "Przek. bezp."};
+const char LOCK_NAMES[][38] PROGMEM = {
+  "",
+  "Brak zaplonu",
+  "Zanik plomienia",
+  "Blad czujnika plomienia",
+  "Napiecie 12V przy wylaczonym YETI",
+  "Pompa zablokowana lub krancowka",
+  "Ciagle restarty sterownika",
+  "Pompa pracowala za dlugo",
+  "Zwarty tranzystor pompy",
+  "Sklejony przekaznik bezpieczenstwa"};
 
 // ============================================================================
 //  ODPORNOSC NA ZAWIESZENIA
@@ -891,10 +904,10 @@ enum FrameKind : uint8_t { FK_LINES, FK_MAIN, FK_EDIT };
 struct Frame {
   FrameKind kind;
   char title[22];
-  char l[4][24];
+  char l[4][LW];
   uint8_t n;
   int8_t hl;
-  char st[12], fl[10], big[10], info[24], val[16];
+  char st[12], fl[10], big[10], info[24], val[16], foot[26];
   uint8_t flX, bigX, valX, bar, dropF, crankF;
 } fr;
 bool rendering = false;
@@ -907,11 +920,31 @@ void drawStrP(uint8_t x, uint8_t y, const char *p) {
 }
 
 // title: napis we Flash (PSTR / PROGMEM)
-void drawLines(const char *title, char lines[][24], uint8_t n, int8_t highlight) {
+// Napis "plywajacy": tekst dluzszy niz okno przesuwa sie znak po znaku, z postojem na
+// poczatku i na koncu. Zwraca indeks pierwszego widocznego znaku.
+uint8_t marqueeStart(uint8_t len, uint8_t win) {
+  if (len <= win) return 0;
+  uint8_t steps = len - win;
+  uint32_t cycle = 2UL * MARQUEE_PAUSE_MS + (uint32_t)steps * MARQUEE_STEP_MS;
+  uint32_t t = millis() % cycle;
+  if (t < MARQUEE_PAUSE_MS) return 0;
+  t -= MARQUEE_PAUSE_MS;
+  return t < (uint32_t)steps * MARQUEE_STEP_MS ? t / MARQUEE_STEP_MS : steps;
+}
+
+// kopiuje widoczny fragment tekstu (okno win znakow) do dst
+void marqueeCopy(char *dst, const char *src, uint8_t win) {
+  uint8_t len = strlen(src);
+  uint8_t st = marqueeStart(len, win);
+  strncpy(dst, src + st, win);
+  dst[win] = '\0';
+}
+
+void drawLines(const char *title, char lines[][LW], uint8_t n, int8_t highlight) {
   fr.kind = FK_LINES;
   strncpy_P(fr.title, title, sizeof fr.title - 1);
   fr.title[sizeof fr.title - 1] = '\0';
-  memcpy(fr.l, lines, n * sizeof fr.l[0]);
+  for (uint8_t i = 0; i < n; i++) marqueeCopy(fr.l[i], lines[i], LINE_CHARS);
   fr.n = n;
   fr.hl = highlight;
 }
@@ -938,11 +971,11 @@ void drawMain(uint32_t now) {
   char big[10], info[24];
 
   if (state == ST_LOCKOUT) {
-    char l[4][24];
-    snprintf_P(l[0], 24, PSTR("%S"), LOCK_NAMES[lockReason]);
-    snprintf_P(l[1], 24, PSTR("Pompa zatrzymana"));
-    snprintf_P(l[2], 24, PSTR("Przytrzymaj przycisk"));
-    snprintf_P(l[3], 24, PSTR("aby skasowac"));
+    char l[4][LW];
+    snprintf_P(l[0], LW, PSTR("%S"), LOCK_NAMES[lockReason]);  // dlugi opis sie przesuwa
+    snprintf_P(l[1], LW, PSTR("Pompa zatrzymana"));
+    snprintf_P(l[2], LW, PSTR("Przytrzymaj przycisk"));
+    snprintf_P(l[3], LW, PSTR("aby skasowac"));
     drawLines(PSTR("!! BLOKADA !!"), l, 4, -1);
     return;
   }
@@ -1042,36 +1075,44 @@ void renderMain() {
 }
 
 void drawInfo(uint32_t now) {
-  char l[4][24];
+  char l[4][LW];
   char a[12], b[12];
   formatV12(a, sizeof a);
-  snprintf_P(l[0], 24, PSTR("YETI:%s 12V:%s"), yetiOn ? "ZAL" : "wyl", v12ok ? a : "brak");
+  snprintf_P(l[0], LW, PSTR("YETI: %S, zasilanie 12V: %s"), yetiOn ? PSTR("zalaczony") : PSTR("wylaczony"),
+             v12ok ? a : "brak");
   if (state == ST_RUN) formatDuration(now - runStartMs, b, sizeof b);
   else strcpy_P(b, PSTR("-"));
-  snprintf_P(l[1], 24, PSTR("Praca: %s"), b);
+  snprintf_P(l[1], LW, PSTR("Czas pracy: %s"), b);
   uint32_t ml = doseCount * cfg.v[P_DOSE_ML] / 100;  // ml podane od wlaczenia
-  if (cfg.v[P_DOSE_ML]) snprintf_P(l[2], 24, PSTR("Dawek:%lu %lu.%luL"), doseCount, ml / 1000, (ml / 100) % 10);
-  else snprintf_P(l[2], 24, PSTR("Dawek: %lu"), doseCount);
-  snprintf_P(l[3], 24, PSTR("Kranc:%S  WDT:%u"),
-             digitalRead(PIN_PARK) == PARK_ACTIVE_LEVEL ? PSTR("PARK") : PSTR("-"), wdtTotal);
+  if (cfg.v[P_DOSE_ML]) snprintf_P(l[2], LW, PSTR("Dawek: %lu, oleju: %lu.%lu litra"), doseCount, ml / 1000, (ml / 100) % 10);
+  else snprintf_P(l[2], LW, PSTR("Dawek: %lu"), doseCount);
+  snprintf_P(l[3], LW, PSTR("Krancowka: %S, restarty: %u"),
+             digitalRead(PIN_PARK) == PARK_ACTIVE_LEVEL ? PSTR("parkowanie") : PSTR("-"), wdtTotal);
   drawLines(PSTR("INFORMACJE"), l, 4, -1);
 }
 
 void drawMenu() {
-  char l[4][24];
+  char l[4][LW];
   char val[12];
   for (uint8_t i = 0; i < 4; i++) {
     uint8_t idx = menuTop + i;
     if (idx < P_COUNT) {
       formatValue(idx, cfg.v[idx], val, sizeof val);
-      snprintf_P(l[i], 24, PSTR("%-11S%9s"), pName(idx), val);
-      l[i][20] = '\0';
+      char name[sizeof(PARAMS[0].name)], vis[LINE_CHARS + 1];
+      strcpy_P(name, pName(idx));
+      uint8_t win = LINE_CHARS - 1 - strlen(val);   // miejsce na nazwe obok wartosci
+      marqueeCopy(vis, name, win);
+      uint8_t k = strlen(vis);
+      memcpy(l[i], vis, k);
+      while (k < win) l[i][k++] = ' ';           // dopelnienie spacjami do szerokosci okna
+      l[i][k++] = ' ';
+      strcpy(l[i] + k, val);
     } else if (idx == MENU_INFO) {
-      snprintf_P(l[i], 24, PSTR("Informacje"));
+      snprintf_P(l[i], LW, PSTR("Informacje"));
     } else if (idx == MENU_PRIME) {
-      snprintf_P(l[i], 24, PSTR("Odpowietrzanie"));
+      snprintf_P(l[i], LW, PSTR("Odpowietrzanie"));
     } else if (idx == MENU_EXIT) {
-      snprintf_P(l[i], 24, PSTR("<< Wyjscie"));
+      snprintf_P(l[i], LW, PSTR("<< Wyjscie"));
     } else {
       l[i][0] = '\0';
     }
@@ -1082,7 +1123,12 @@ void drawMenu() {
 void drawEdit() {
   fr.kind = FK_EDIT;
   formatValue(menuIdx, editVal, fr.val, sizeof fr.val);
-  strcpy_P(fr.title, pName(menuIdx));
+  char name[sizeof(PARAMS[0].name)];
+  strcpy_P(name, pName(menuIdx));
+  marqueeCopy(fr.title, name, 18);               // 18 znakow czcionki 7 px
+  char foot[40];
+  strcpy_P(foot, PSTR("klik = zapisz, przytrzymanie = anuluj"));
+  marqueeCopy(fr.foot, foot, 25);                // 25 znakow czcionki 5 px
   oled.setFont(u8g2_font_10x20_tr);
   fr.valX = (128 - oled.getStrWidth(fr.val)) / 2;
 }
@@ -1094,7 +1140,7 @@ void renderEdit() {
   oled.setFont(u8g2_font_10x20_tr);
   oled.drawStr(fr.valX, 42, fr.val);
   oled.setFont(u8g2_font_5x7_tr);
-  drawStrP(0, 63, PSTR("klik=zapisz  trzymaj=anuluj"));
+  oled.drawStr(0, 63, fr.foot);
 }
 
 void renderFrame() {
@@ -1106,14 +1152,14 @@ void renderFrame() {
 }
 
 void drawPrime() {
-  char l[4][24];
+  char l[4][LW];
   char a[12];
   formatV12(a, sizeof a);
-  snprintf_P(l[0], 24, PSTR("Trzymaj przycisk ="));
-  snprintf_P(l[1], 24, PSTR("pompowanie (max 60s)"));
-  if (!v12ok) snprintf_P(l[2], 24, PSTR("BRAK 12V (YETI wyl?)"));
-  else snprintf_P(l[2], 24, PSTR("%s  12V:%s"), priming ? "POMPUJE" : "stop", a);
-  snprintf_P(l[3], 24, PSTR("Obrot = wyjscie"));
+  snprintf_P(l[0], LW, PSTR("Trzymaj przycisk ="));
+  snprintf_P(l[1], LW, PSTR("pompowanie (najwyzej 60 s)"));
+  if (!v12ok) snprintf_P(l[2], LW, PSTR("Brak 12V - czy YETI jest wylaczony?"));
+  else snprintf_P(l[2], LW, PSTR("%S, zasilanie 12V: %s"), priming ? PSTR("POMPUJE") : PSTR("stoi"), a);
+  snprintf_P(l[3], LW, PSTR("Obrot pokretla = wyjscie"));
   drawLines(PSTR("ODPOWIETRZANIE"), l, 4, priming ? 2 : -1);
 }
 

@@ -176,9 +176,9 @@ Zajętość: ok. 82 % Flash, 51 % RAM.
 | Pierwsza dawka po starcie dopiero po pełnym interwale | restart nie daje dodatkowej dawki oleju |
 | Timeout I2C (5 ms) + ponowna inicjalizacja OLED | zakłócona magistrala nie zawiesi programu; ekran odświeżany co 10 min i po każdym błędzie I2C (tylko gdy pompa stoi) |
 | Kontrola sumy ustawień w RAM co 5 s | uszkodzone przez zakłócenia ustawienia są wczytywane ponownie z EEPROM |
-| Kontrola obrotu pompy (krańcówka, w każdym trybie dawki) | silnik ma prąd, a przez ~3 s pracy (sumowanej przez dawki) nie ma obrotu = **blokada „Pompa zablok.”** – zablokowany silnik bierze 15–20 A i się grzeje. Menu `Kontr.obrot` = nie wyłącza (tylko gdy krańcówka nie jest podłączona) |
+| Kontrola obrotu pompy (krańcówka, w każdym trybie dawki) | silnik ma prąd, a przez ~3 s pracy (sumowanej przez dawki) nie ma obrotu = **blokada „Pompa zablok.”** – zablokowany silnik bierze 15–20 A i się grzeje. Menu „Kontrola obrotu pompy” = nie wyłącza (tylko gdy krańcówka nie jest podłączona) |
 | Test przekaźnika bezpieczeństwa także co 5 min pracy | sklejenie styku w trakcie pracy wykryte najpóźniej po 5 min |
-| Domyślnie kontrola płomienia termoparą | brak lub odłączona termopara = **blokada „Blad czujnika”** po ok. 1 s; wyłączenie kontroli wymaga świadomego ustawienia `Czujnik pl. = brak` |
+| Domyślnie kontrola płomienia termoparą | brak lub odłączona termopara = **blokada „Blad czujnika”** po ok. 1 s; wyłączenie kontroli wymaga świadomego ustawienia „Czujnik plomienia” = brak |
 | Strażnik czasu pracy pompy (32 s) | pojedyncze załączenie dłuższe niż najdłuższa dawka = **blokada „Pompa za dlugo”** |
 | Blokady zapisane w EEPROM | zanik zasilania nie kasuje blokady |
 
