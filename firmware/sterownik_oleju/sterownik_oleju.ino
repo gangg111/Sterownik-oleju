@@ -84,13 +84,15 @@ const uint32_t I2C_TIMEOUT_US     = 5000;  // zawieszona magistrala I2C nie zabl
 const uint16_t CFG_CHECK_MS       = 5000;  // kontrola sumy ustawien w RAM
 const uint16_t PARK_MIN_GAP_MS    = 200;   // krotszy obrot = drgania styku
 const uint32_t REV_TIMEOUT_MS     = 8000;  // brak obrotu w tym czasie = blokada
+const uint32_t JAM_MS             = 3000;  // praca (przeliczona na 100 % PWM) bez obrotu = zablokowana pompa
+const uint32_t SAFETY_RETEST_MS   = 300000UL; // test przekaznika bezpieczenstwa takze co 5 min w pracy
 
 // ============================================================================
 //  PARAMETRY (zapisywane w EEPROM)
 // ============================================================================
 enum ParamId : uint8_t {
   P_INTERVAL, P_DOSE_MODE, P_DOSE_TIME, P_DOSE_REVS, P_DOSE_ML,
-  P_POWER, P_KICK,
+  P_PARK_CHK, P_POWER, P_KICK,
   P_FLAME_MODE, P_FLAME_TEMP, P_IGN_TIME, P_LOSS_TIME,
   P_COUNT
 };
@@ -112,9 +114,10 @@ const ParamDef PARAMS[P_COUNT] PROGMEM = {
   {"Czas dawki",     1,  300,   0,  1,    5, "s"},    // 0.1 .. 30.0 s
   {"Obroty/daw.",    1,   20,   1,  0,    1, "obr"},
   {"ml/dawke",       0, 2000,   0,  2,    0, "ml"},   // 0 = nie skalibrowano
+  {"Kontr.obrot",    0,    1,   1,  0,    1, ""},     // krancowka pilnuje, czy pompa sie kreci
   {"Moc pompy",     20,  100,   5,  0,  100, "%"},
   {"Kopniecie",      0, 2000, 100,  0,  200, "ms"},
-  {"Czujnik pl.",    0,    2,   1,  0,    0, ""},
+  {"Czujnik pl.",    0,    2,   1,  0,    2, ""},     // domyslnie termopara: brak czujnika = blokada
   {"Prog plom.",    40,  600,   5,  0,  120, "C"},
   {"Czas zapl.",     1,   30,   1,  0,    5, "min"},
   {"Zanik plom.",    5,  300,   5,  0,   60, "s"},
@@ -142,7 +145,7 @@ struct Settings {
 };
 
 const uint8_t CFG_MAGIC   = 0xA5;
-const uint8_t CFG_VERSION = 2;
+const uint8_t CFG_VERSION = 3;
 const int     EE_CFG      = 0;
 const int     EE_LOCK     = 64;
 
@@ -158,7 +161,7 @@ enum LockReason : uint8_t {
   L_NONE, L_NO_IGNITION, L_FLAME_LOSS, L_SENSOR, L_RELAY, L_PUMP, L_WATCHDOG, L_PUMP_TIME, L_MOSFET, L_SAFETY, L_COUNT
 };
 const char LOCK_NAMES[][16] PROGMEM = {"", "Brak zaplonu", "Zanik plomienia", "Blad czujnika", "Przekaznik/12V",
-                                       "Pompa/krancowka", "Restarty MCU", "Pompa za dlugo",
+                                       "Pompa zablok.", "Restarty MCU", "Pompa za dlugo",
                                        "Klucz zwarty", "Przek. bezp."};
 
 // ============================================================================
@@ -218,6 +221,8 @@ uint8_t  pumpDuty = 0;
 uint32_t ignElapsedMs = 0;
 uint32_t flameLossMs = 0;
 uint32_t runStartMs = 0;
+uint16_t jamParkSeen = 0;     // ostatnio widziany licznik krancowki
+uint32_t jamRunMs = 0;        // praca silnika bez obrotu
 
 // UI
 enum UiMode : uint8_t { UI_MAIN, UI_MENU, UI_EDIT, UI_PRIME, UI_INFO };
@@ -304,6 +309,7 @@ void lockout(LockReason r) {
 
 void clearLockout() {
   lockReason = L_NONE;
+  jamRunMs = 0;
   wdtStreak = 0;
   state = ST_IDLE;
   relayFaultMs = 0;
@@ -604,6 +610,7 @@ void updateState(uint32_t now, uint32_t dt) {
 //    i blokada. Najczestsza awaria tranzystora (zwarcie) nie konczy sie ciaglym podawaniem oleju.
 // ============================================================================
 bool     safetyOn = false, safetyTested = false;
+uint32_t lastSafetyTestMs = 0;
 uint32_t mosfetFaultMs = 0;
 
 void setSafety(bool on) {
@@ -650,8 +657,18 @@ bool updateSafety(uint32_t now, uint32_t dt, bool wantPower) {
     if (!v12ok) return false;                 // test tylko przy obecnym 12 V
     if (!safetyRelayTest()) { lockout(L_SAFETY); return false; }
     safetyTested = true;
+    lastSafetyTestMs = millis();
     setSafety(true);
     return false;                             // pompa od nastepnego obiegu petli
+  }
+  // co 5 min w pracy powtorz test styku (sklejenie w trakcie pracy nie moze czekac do jutra);
+  // tylko w przerwie miedzy dawkami, gdy do nastepnej zostalo > 0,6 s
+  if (!priming && !doseActive && pumpDuty == 0 && now - lastSafetyTestMs >= SAFETY_RETEST_MS) {
+    uint32_t el = now - cycleStartMs, iv = intervalMs();
+    if (el + 600 < iv) {
+      if (!safetyRelayTest()) { lockout(L_SAFETY); return false; }
+      lastSafetyTestMs = millis();
+    }
   }
   setSafety(true);
   if (pumpDuty == 0 && vMotor > V_MOTOR_ON) {
@@ -699,6 +716,23 @@ void updatePump(uint32_t now, uint32_t dt) {
   }
   // "kopniecie": pelna moc na starcie, zeby ruszyc zimny olej / zatarty silnik
   setPumpDuty(now - pumpStartMs < cfg.v[P_KICK] ? 100 : (uint8_t)effectivePower());
+
+  // Zablokowana pompa (w kazdym trybie dawki): silnik ma prad, a krancowka nie zglasza obrotu.
+  // Czas pracy liczony z wagi PWM (wolniej = dluzej na obrot), sumowany przez kolejne dawki.
+  // Zablokowany silnik bierze 15-20 A i grzeje sie - trzeba go zatrzymac.
+  if (cfg.v[P_PARK_CHK]) {
+    uint16_t pc = readParkCount();
+    if (pc != jamParkSeen) {
+      jamParkSeen = pc;
+      jamRunMs = 0;
+    } else {
+      jamRunMs += dt * pumpDuty / 100;
+      if (jamRunMs > JAM_MS) {
+        setPumpDuty(0);
+        lockout(L_PUMP);
+      }
+    }
+  }
 }
 
 void updateBuzzer(uint32_t now) {
@@ -817,6 +851,8 @@ void formatFixed(uint16_t val, uint8_t dec, char *buf, size_t len) {
 void formatValue(uint8_t id, uint16_t val, char *buf, size_t len) {
   if (id == P_FLAME_MODE) {
     snprintf_P(buf, len, PSTR("%S"), FLAME_MODE_NAMES[val]);
+  } else if (id == P_PARK_CHK) {
+    snprintf_P(buf, len, val ? PSTR("tak") : PSTR("nie"));
   } else if (id == P_DOSE_MODE) {
     snprintf_P(buf, len, PSTR("%S"), DOSE_MODE_NAMES[val]);
   } else if (id == P_DOSE_ML && val == 0) {
@@ -1157,7 +1193,7 @@ void setup() {
   pinMode(PIN_TC_CS, OUTPUT);
   digitalWrite(PIN_TC_CS, HIGH);
   pinMode(PIN_TC_SCK, OUTPUT);
-  pinMode(PIN_TC_SO, INPUT);
+  pinMode(PIN_TC_SO, INPUT_PULLUP);  // brak modulu MAX6675 = same jedynki = blad czujnika
 
   loadSettings();                            // pierwszy start: zapis domyslnych do EEPROM ~90 ms
   wdt_reset();

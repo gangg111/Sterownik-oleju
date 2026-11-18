@@ -186,8 +186,8 @@
           <button class="btn" id="btn-out">Zgaś płomień</button>
         </div>
         <p class="note">Płomień zapala się sam po kilku sekundach podawania oleju, a gaśnie po 45 s bez oleju.
-          Żeby sterownik go pilnował, ustaw w menu <code>Czujnik pl.</code> na <code>termopara</code>
-          (albo <code>termostat</code>, wtedy zwiera powyżej 60 °C).</p>
+          Sterownik domyślnie pilnuje płomienia termoparą (menu <code>Czujnik pl.</code>);
+          ustawienie <code>brak</code> wyłącza tę kontrolę i ekran pokazuje <code>!plom</code>.</p>
       </section>
       <section class="card" aria-labelledby="h-fault">
         <h2 id="h-fault">Usterki · test zabezpieczeń</h2>
@@ -203,9 +203,13 @@
           <button class="btn" id="btn-hang">Zawieś Arduino</button>
           <span class="note" id="hang-note">Restartów watchdoga: <b id="v-wdt">0</b></span>
         </div>
-        <p class="note">Sklejony przekaźnik bezpieczeństwa wykrywa test przy każdym uruchomieniu pompy.
-          Zwarty tranzystor: sterownik otwiera przekaźnik bezpieczeństwa i blokuje się.
-          Zawieszenie: watchdog restartuje Arduino po 0,25 s, trzy z rzędu dają blokadę.</p>
+        <p class="note"><b>Kiedy zadziała:</b> termopara – po ok. 1 s. Pompa zablokowana – gdy silnik
+          przepracuje łącznie ok. 3 s bez obrotu (przy dawkach 0,5 s to kilka dawek, ok. 30 s).
+          Sklejony przekaźnik bezpieczeństwa – test przy każdym starcie i co 5 min pracy.
+          Sklejony przekaźnik YETI – dopiero gdy YETI wyłączy dmuchawę (w trakcie grzania 12 V i tak
+          ma być), po 3 s. Zwarty tranzystor – po 0,3 s. Zawieszenie – restart po 0,25 s, trzy z rzędu
+          = blokada. Przy sklejonym styku przekaźnik fizycznie zostaje zamknięty, ale pompę zatrzymuje
+          tranzystor – na tym polega drugi kanał.</p>
       </section>
     </div>
   </div>
