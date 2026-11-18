@@ -170,6 +170,7 @@ Zajętość: ok. 82 % Flash, 51 % RAM.
 
 | Zabezpieczenie | Co robi |
 |---|---|
+| Pętla programu nigdy nie stoi dłużej niż ~15 ms | ekran rysowany po jednym pasku na obieg pętli, przycisk obsługiwany w przerwaniu (krótkie kliknięcia nie giną) |
 | Watchdog **250 ms** od pierwszej instrukcji | zawieszony program = reset po ¼ s; reset ustawia piny jako wejścia, rezystor 10 kΩ zamyka klucz pompy. Zawieszenie w trakcie dawki dokłada najwyżej ~0,25 s pracy pompy (sprawdzone w emulatorze: 255 ms, ~2 ml) |
 | Licznik restartów w pamięci `.noinit` | 3 restarty watchdoga bez 10 min stabilnej pracy = **blokada „Restarty MCU”** (sterownik, który ciągle się wiesza, przestaje podawać olej). Liczba restartów w menu Informacje (`WDT:`) |
 | Pierwsza dawka po starcie dopiero po pełnym interwale | restart nie daje dodatkowej dawki oleju |

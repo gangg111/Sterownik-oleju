@@ -67,7 +67,6 @@ const uint16_t PWM_TOP            = 1000;  // 16 MHz / (2 * 8 * 1000) = 1 kHz
 const uint16_t YETI_DEBOUNCE_MS   = 150;
 const uint16_t YETI_EDGE_TIMEOUT  = 40;    // brak zboczy dluzej = brak 230 V
 const uint16_t RELAY_FAULT_MS     = 3000;
-const uint16_t BTN_DEBOUNCE_MS    = 25;
 const uint16_t BTN_LONG_MS        = 1500;
 const uint16_t DISPLAY_PERIOD_MS  = 100;   // 10 klatek/s - plynne animacje ikon
 const uint16_t ANIM_STEP_MS       = 100;   // czas jednej klatki animacji
@@ -246,9 +245,13 @@ const int8_t ENC_TABLE[16] = {0, -1, 1, 0, 1, 0, 0, -1, -1, 0, 0, 1, 0, 1, -1, 0
 // przycisk
 enum BtnEvent : uint8_t { EV_NONE, EV_CLICK, EV_LONG };
 struct Button {
-  bool stable = false, lastRaw = false, longFired = false;
-  uint32_t changeMs = 0, pressMs = 0;
+  bool stable = false, longFired = false;
 } btn;
+// Przycisk obslugiwany w przerwaniu: krotkie klikniecie nie zginie, nawet gdy petla
+// glowna jest chwilowo zajeta (rysowanie ekranu, zapis EEPROM, test przekaznika).
+volatile bool     btnDown = false, btnReleased = false;
+volatile uint32_t btnDownMs = 0, btnEdgeMs = 0, btnHeldMs = 0;
+volatile uint8_t  pindLast = 0xFF;
 
 #if OLED_SH1106
 U8G2_SH1106_128X64_NONAME_1_HW_I2C oled(U8G2_R0, U8X8_PIN_NONE);
@@ -316,8 +319,22 @@ void encoderIsr() {
   encCount += ENC_TABLE[encState];
 }
 
-ISR(PCINT2_vect) {  // D5 = PCINT21: kazde zbocze z transoptora
-  yetiEdgeMs = millis();
+ISR(PCINT2_vect) {  // D4 = PCINT20 (przycisk), D5 = PCINT21 (transoptor YETI)
+  uint8_t pind = PIND;
+  uint8_t changed = pind ^ pindLast;
+  pindLast = pind;
+  uint32_t t = millis();
+  if (changed & _BV(5)) yetiEdgeMs = t;
+  if (changed & _BV(4)) {
+    if (!(pind & _BV(4))) {                     // wcisniety (LOW)
+      if (!btnDown && t - btnEdgeMs > 15) { btnDown = true; btnDownMs = t; }
+    } else if (btnDown && t - btnDownMs > 20) {  // puszczony; krotsze = drgania styku
+      btnDown = false;
+      btnReleased = true;
+      btnHeldMs = t - btnDownMs;
+    }
+    btnEdgeMs = t;
+  }
 }
 
 ISR(PCINT0_vect) {  // D8 = PCINT0: krancowka wycieraczki
@@ -457,21 +474,22 @@ void updateFlame(uint32_t now) {
 }
 
 BtnEvent pollButton(uint32_t now) {
-  bool raw = digitalRead(PIN_ENC_SW) == LOW;
-  if (raw != btn.lastRaw) {
-    btn.lastRaw = raw;
-    btn.changeMs = now;
+  noInterrupts();
+  // zabezpieczenie przed "zawieszonym" wcisnieciem: pin od dawna HIGH, a flaga mowi "wcisniety"
+  if (btnDown && (PIND & _BV(4)) && now - btnEdgeMs > 60) btnDown = false;
+  bool down = btnDown, released = btnReleased;
+  uint32_t downMs = btnDownMs, heldMs = btnHeldMs;
+  btnReleased = false;
+  interrupts();
+
+  btn.stable = down;
+  if (released) {
+    bool wasLong = btn.longFired;
+    btn.longFired = false;
+    if (!wasLong && heldMs < BTN_LONG_MS) return EV_CLICK;
+    return EV_NONE;
   }
-  if (now - btn.changeMs >= BTN_DEBOUNCE_MS && raw != btn.stable) {
-    btn.stable = raw;
-    if (raw) {
-      btn.pressMs = now;
-      btn.longFired = false;
-    } else if (!btn.longFired) {
-      return EV_CLICK;
-    }
-  }
-  if (btn.stable && !btn.longFired && now - btn.pressMs >= BTN_LONG_MS) {
+  if (down && !btn.longFired && now - downMs >= BTN_LONG_MS) {
     btn.longFired = true;
     return EV_LONG;
   }
@@ -827,6 +845,24 @@ void formatV12(char *buf, size_t len) {
   snprintf_P(buf, len, PSTR("%d.%dV"), t / 10, t % 10);
 }
 
+// ============================================================================
+//  EKRAN: rysowanie bez blokowania petli
+//  U8g2 w trybie stron rysuje ekran w 8 paskach po 8 wierszy. Zamiast rysowac cala klatke
+//  naraz (~100 ms z duza czcionka), program przygotowuje dane klatki (Frame), a potem
+//  rysuje JEDEN pasek na obieg petli (~12 ms). Petla glowna nigdy nie stoi dluzej.
+// ============================================================================
+enum FrameKind : uint8_t { FK_LINES, FK_MAIN, FK_EDIT };
+struct Frame {
+  FrameKind kind;
+  char title[22];
+  char l[4][24];
+  uint8_t n;
+  int8_t hl;
+  char st[12], fl[10], big[10], info[24], val[16];
+  uint8_t flX, bigX, valX, bar, dropF, crankF;
+} fr;
+bool rendering = false;
+
 void drawStrP(uint8_t x, uint8_t y, const char *p) {
   char b[32];
   strncpy_P(b, p, sizeof b - 1);
@@ -836,27 +872,30 @@ void drawStrP(uint8_t x, uint8_t y, const char *p) {
 
 // title: napis we Flash (PSTR / PROGMEM)
 void drawLines(const char *title, char lines[][24], uint8_t n, int8_t highlight) {
-  char t[22];
-  strncpy_P(t, title, sizeof t - 1);
-  t[sizeof t - 1] = '\0';
-  oled.firstPage();
-  do {
-    oled.setFont(u8g2_font_7x14B_tr);
-    oled.drawStr(0, 12, t);
-    oled.drawHLine(0, 15, 128);
-    oled.setFont(u8g2_font_6x10_tr);
-    for (uint8_t i = 0; i < n; i++) {
-      uint8_t y = 26 + i * 11;
-      if ((int8_t)i == highlight) {
-        oled.drawBox(0, y - 9, 128, 11);
-        oled.setDrawColor(0);
-        oled.drawStr(2, y, lines[i]);
-        oled.setDrawColor(1);
-      } else {
-        oled.drawStr(2, y, lines[i]);
-      }
+  fr.kind = FK_LINES;
+  strncpy_P(fr.title, title, sizeof fr.title - 1);
+  fr.title[sizeof fr.title - 1] = '\0';
+  memcpy(fr.l, lines, n * sizeof fr.l[0]);
+  fr.n = n;
+  fr.hl = highlight;
+}
+
+void renderLines() {
+  oled.setFont(u8g2_font_7x14B_tr);
+  oled.drawStr(0, 12, fr.title);
+  oled.drawHLine(0, 15, 128);
+  oled.setFont(u8g2_font_6x10_tr);
+  for (uint8_t i = 0; i < fr.n; i++) {
+    uint8_t y = 26 + i * 11;
+    if ((int8_t)i == fr.hl) {
+      oled.drawBox(0, y - 9, 128, 11);
+      oled.setDrawColor(0);
+      oled.drawStr(2, y, fr.l[i]);
+      oled.setDrawColor(1);
+    } else {
+      oled.drawStr(2, y, fr.l[i]);
     }
-  } while (oled.nextPage());
+  }
 }
 
 void drawMain(uint32_t now) {
@@ -930,28 +969,40 @@ void drawMain(uint32_t now) {
     crankF = (crankF + 1) % IKONA_KORBA_KLATKI;
   }
 
-  oled.firstPage();
-  do {
-    // gorny pasek: stan po lewej, plomien do x=100; prawy gorny rog = ikona pracy pompy
-    oled.setFont(u8g2_font_6x10_tr);
-    oled.drawStr(0, 9, st);
-    oled.drawStr(100 - oled.getStrWidth(fl), 9, fl);
-    oled.drawHLine(0, 11, 101);
-    oled.drawXBMP(104, 0, IKONA_W, IKONA_H, IKONA_KORBA[crankF]);
-    // lewa strona: ikona dawkowania + podpis
-    oled.drawXBMP(0, 14, IKONA_W, IKONA_H, IKONA_KROPLA[dropF]);
-    oled.setFont(u8g2_font_5x7_tr);
-    drawStrP(0, 46, PSTR("DAWKA"));
-    // srodek: interwal (do x=100, zeby nie wchodzic pod ikone w rogu)
-    oled.setFont(u8g2_font_logisoso24_tn);
-    oled.drawStr(100 - oled.getStrWidth(big), 46, big);
-    oled.setFont(u8g2_font_7x14B_tr);
-    drawStrP(104, 46, PSTR("s"));
-    oled.setFont(u8g2_font_6x10_tr);
-    oled.drawStr(0, 56, info);
-    oled.drawFrame(0, 59, 128, 5);
-    if (bar) oled.drawBox(0, 59, bar, 5);
-  } while (oled.nextPage());
+  fr.kind = FK_MAIN;
+  strcpy(fr.st, st);
+  strcpy(fr.fl, fl);
+  strcpy(fr.big, big);
+  strcpy(fr.info, info);
+  oled.setFont(u8g2_font_6x10_tr);
+  fr.flX = 100 - oled.getStrWidth(fl);
+  oled.setFont(u8g2_font_logisoso24_tn);
+  fr.bigX = 100 - oled.getStrWidth(big);
+  fr.bar = bar;
+  fr.dropF = dropF;
+  fr.crankF = crankF;
+}
+
+void renderMain() {
+  // gorny pasek: stan po lewej, plomien do x=100; prawy gorny rog = ikona pracy pompy
+  oled.setFont(u8g2_font_6x10_tr);
+  oled.drawStr(0, 9, fr.st);
+  oled.drawStr(fr.flX, 9, fr.fl);
+  oled.drawHLine(0, 11, 101);
+  oled.drawXBMP(104, 0, IKONA_W, IKONA_H, IKONA_KORBA[fr.crankF]);
+  // lewa strona: ikona dawkowania + podpis
+  oled.drawXBMP(0, 14, IKONA_W, IKONA_H, IKONA_KROPLA[fr.dropF]);
+  oled.setFont(u8g2_font_5x7_tr);
+  drawStrP(0, 46, PSTR("DAWKA"));
+  // srodek: interwal (do x=100, zeby nie wchodzic pod ikone w rogu)
+  oled.setFont(u8g2_font_logisoso24_tn);
+  oled.drawStr(fr.bigX, 46, fr.big);
+  oled.setFont(u8g2_font_7x14B_tr);
+  drawStrP(104, 46, PSTR("s"));
+  oled.setFont(u8g2_font_6x10_tr);
+  oled.drawStr(0, 56, fr.info);
+  oled.drawFrame(0, 59, 128, 5);
+  if (fr.bar) oled.drawBox(0, 59, fr.bar, 5);
 }
 
 void drawInfo(uint32_t now) {
@@ -993,20 +1044,29 @@ void drawMenu() {
 }
 
 void drawEdit() {
-  char val[16];
-  char name[12];
-  formatValue(menuIdx, editVal, val, sizeof val);
-  strcpy_P(name, pName(menuIdx));
-  oled.firstPage();
-  do {
-    oled.setFont(u8g2_font_7x14B_tr);
-    oled.drawStr(0, 12, name);
-    oled.drawHLine(0, 15, 128);
-    oled.setFont(u8g2_font_10x20_tr);
-    oled.drawStr((128 - oled.getStrWidth(val)) / 2, 42, val);
-    oled.setFont(u8g2_font_5x7_tr);
-    drawStrP(0, 63, PSTR("klik=zapisz  trzymaj=anuluj"));
-  } while (oled.nextPage());
+  fr.kind = FK_EDIT;
+  formatValue(menuIdx, editVal, fr.val, sizeof fr.val);
+  strcpy_P(fr.title, pName(menuIdx));
+  oled.setFont(u8g2_font_10x20_tr);
+  fr.valX = (128 - oled.getStrWidth(fr.val)) / 2;
+}
+
+void renderEdit() {
+  oled.setFont(u8g2_font_7x14B_tr);
+  oled.drawStr(0, 12, fr.title);
+  oled.drawHLine(0, 15, 128);
+  oled.setFont(u8g2_font_10x20_tr);
+  oled.drawStr(fr.valX, 42, fr.val);
+  oled.setFont(u8g2_font_5x7_tr);
+  drawStrP(0, 63, PSTR("klik=zapisz  trzymaj=anuluj"));
+}
+
+void renderFrame() {
+  switch (fr.kind) {
+    case FK_LINES: renderLines(); break;
+    case FK_MAIN:  renderMain(); break;
+    case FK_EDIT:  renderEdit(); break;
+  }
 }
 
 void drawPrime() {
@@ -1034,6 +1094,11 @@ void oledInit() {
 
 void updateDisplay(uint32_t now) {
   static uint32_t lastReinitMs = 0;
+  if (rendering) {                 // dokoncz biezaca klatke: jeden pasek na obieg petli
+    renderFrame();
+    rendering = oled.nextPage();
+    return;
+  }
   if (now - lastDisplayMs < DISPLAY_PERIOD_MS) return;
   lastDisplayMs = now;
   // blad magistrali I2C (zaklocenia od silnika / 230 V) albo okresowo: ponowna konfiguracja
@@ -1050,6 +1115,9 @@ void updateDisplay(uint32_t now) {
     case UI_PRIME: drawPrime(); break;
     case UI_INFO:  drawInfo(now); break;
   }
+  oled.firstPage();
+  renderFrame();
+  rendering = oled.nextPage();
 }
 
 // ============================================================================
@@ -1098,7 +1166,8 @@ void setup() {
 
   attachInterrupt(digitalPinToInterrupt(PIN_ENC_A), encoderIsr, CHANGE);
   attachInterrupt(digitalPinToInterrupt(PIN_ENC_B), encoderIsr, CHANGE);
-  PCMSK2 |= _BV(PCINT21);  // D5 - YETI
+  pindLast = PIND;
+  PCMSK2 |= _BV(PCINT21) | _BV(PCINT20);  // D5 - YETI, D4 - przycisk enkodera
   PCMSK0 |= _BV(PCINT0);   // D8 - krancowka
   PCICR  |= _BV(PCIE2) | _BV(PCIE0);
 
