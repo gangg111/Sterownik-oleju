@@ -96,7 +96,7 @@ const uint32_t SAFETY_RETEST_MS   = 300000UL; // test przekaznika bezpieczenstwa
 //  PARAMETRY (zapisywane w EEPROM)
 // ============================================================================
 enum ParamId : uint8_t {
-  P_INTERVAL, P_DOSE_MODE, P_DOSE_TIME, P_DOSE_REVS, P_DOSE_ML,
+  P_INTERVAL, P_DOSE_MODE, P_SPEED, P_FLOW100, P_DOSE_TIME, P_DOSE_REVS, P_DOSE_ML,
   P_PARK_CHK, P_POWER, P_KICK,
   P_FLAME_MODE, P_FLAME_TEMP, P_IGN_TIME, P_LOSS_TIME,
   P_COUNT
@@ -116,7 +116,9 @@ const ParamDef PARAMS[P_COUNT] PROGMEM = {
   // nazwa         min   max  krok dec domysl. jedn.
   // nazwa                           min   max  krok dec domysl. jedn.
   {"Interwał dawek",                   5, 1200,   0,  1,   60, "s"},    // 0.5 .. 120.0 s
-  {"Tryb dawkowania",                  0,    1,   1,  0,    0, ""},     // czas / obroty
+  {"Tryb dawkowania",                  0,    2,   1,  0,    2, ""},     // czas / obroty / ciągły
+  {"Prędkość pompy (ciągła)",         10,  100,   1,  0,   40, "%"},    // jak potencjometr MIN-MAX
+  {"Wydajność pompy przy 100%",        0,  600,   0,  1,    0, "l/h"},  // 0 = nie zmierzono
   {"Czas jednej dawki",                1,  300,   0,  1,    5, "s"},    // 0.1 .. 30.0 s
   {"Obroty na jedną dawkę",            1,   20,   1,  0,    1, "obr"},
   {"Ilość oleju w jednej dawce",       0, 2000,   0,  2,    0, "ml"},   // 0 = nie skalibrowano
@@ -131,8 +133,8 @@ const ParamDef PARAMS[P_COUNT] PROGMEM = {
 
 enum FlameMode : uint8_t { FM_NONE, FM_THERMOSTAT, FM_THERMOCOUPLE };
 const char FLAME_MODE_NAMES[][10] PROGMEM = {"brak", "termostat", "termopara"};
-enum DoseMode : uint8_t { DM_TIME, DM_REVS };
-const char DOSE_MODE_NAMES[][7] PROGMEM = {"czas", "obroty"};
+enum DoseMode : uint8_t { DM_TIME, DM_REVS, DM_CONT };
+const char DOSE_MODE_NAMES[][9] PROGMEM = {"czas", "obroty", "ciągły"};
 
 // odczyt pol definicji parametru z Flash
 uint16_t pMin(uint8_t i)  { return pgm_read_word(&PARAMS[i].minV); }
@@ -151,7 +153,7 @@ struct Settings {
 };
 
 const uint8_t CFG_MAGIC   = 0xA5;
-const uint8_t CFG_VERSION = 3;
+const uint8_t CFG_VERSION = 4;
 const int     EE_CFG      = 0;
 const int     EE_LOCK     = 64;
 
@@ -493,8 +495,12 @@ void updateFlame(uint32_t now) {
   }
 }
 
-BtnEvent pollButton(uint32_t now) {
+BtnEvent pollButton(uint32_t) {
   noInterrupts();
+  // swiezy czas odczytany razem ze stanem przycisku: gdyby uzyc czasu z poczatku petli,
+  // wcisniecie zarejestrowane w przerwaniu chwile pozniej dawaloby ujemna roznice czasu,
+  // ktora po "przekreceniu" licznika wygladalaby jak dlugie przytrzymanie
+  uint32_t now = millis();
   // zabezpieczenie przed "zawieszonym" wcisnieciem: pin od dawna HIGH, a flaga mowi "wcisniety"
   if (btnDown && (PIND & _BV(4)) && now - btnEdgeMs > 60) btnDown = false;
   bool down = btnDown, released = btnReleased;
@@ -519,10 +525,13 @@ BtnEvent pollButton(uint32_t now) {
 // ============================================================================
 //  LOGIKA
 // ============================================================================
+bool contMode() { return cfg.v[P_DOSE_MODE] == DM_CONT; }
+
 uint16_t effectivePower() {
-  // podczas edycji mocy zmiana dziala od razu - wygodne przy regulacji palnika
-  if (ui == UI_EDIT && menuIdx == P_POWER) return editVal;
-  return cfg.v[P_POWER];
+  // podczas edycji zmiana dziala od razu - wygodne przy regulacji palnika
+  uint8_t id = contMode() ? P_SPEED : P_POWER;
+  if (ui == UI_EDIT && menuIdx == id) return editVal;
+  return cfg.v[id];
 }
 
 uint32_t intervalMs() {
@@ -542,6 +551,12 @@ void resetCycle(uint32_t now) {
 
 // Zwraca true, gdy pompka ma teraz pracowac.
 bool updateDosing(uint32_t now, uint32_t dt) {
+  // Praca ciagla (jak potencjometr w fabrycznym zestawie): pompa kreci sie bez przerw,
+  // ilosc oleju ustawia predkosc (PWM). Pompa zebata podaje olej proporcjonalnie do obrotow.
+  if (contMode()) {
+    doseActive = true;
+    return true;
+  }
   if (!doseActive && now - cycleStartMs >= intervalMs()) {
     doseActive = true;
     cycleStartMs = now;
@@ -677,9 +692,20 @@ bool updateSafety(uint32_t now, uint32_t dt, bool wantPower) {
   }
   // co 5 min w pracy powtorz test styku (sklejenie w trakcie pracy nie moze czekac do jutra);
   // tylko w przerwie miedzy dawkami, gdy do nastepnej zostalo > 0,6 s
-  if (!priming && !doseActive && pumpDuty == 0 && now - lastSafetyTestMs >= SAFETY_RETEST_MS) {
-    uint32_t el = now - cycleStartMs, iv = intervalMs();
-    if (el + 600 < iv) {
+  // (w pracy ciaglej: krotka przerwa ~0,5 s, w ktorej sprawdzany jest tez tranzystor:
+  //  klucz wylaczony przy zamknietym przekazniku -> na silniku musi byc 0 V)
+  if (!priming && now - lastSafetyTestMs >= SAFETY_RETEST_MS) {
+    bool cont = contMode();
+    if (cont || (!doseActive && pumpDuty == 0 && (now - cycleStartMs) + 600 < intervalMs())) {
+      if (cont) {
+        setPumpDuty(0);
+        delay(120);                    // wybieg silnika (przekladnia slimakowa staje szybko)
+        wdt_reset();
+        delay(80);
+        wdt_reset();
+        if (readMotorVolts() > V_MOTOR_ON) { setSafety(false); lockout(L_MOSFET); return false; }
+        pumpWasOn = false;             // po przerwie znowu kopniecie przy starcie
+      }
       if (!safetyRelayTest()) { lockout(L_SAFETY); return false; }
       lastSafetyTestMs = millis();
     }
@@ -723,7 +749,7 @@ void updatePump(uint32_t now, uint32_t dt) {
   }
   // niezalezny straznik: pojedyncze zalaczenie pompy nigdy nie trwa dluzej niz najdluzsza
   // dawka; dluzej = uszkodzony stan programu (np. zaklocenia w RAM) -> twarde zatrzymanie
-  if (!priming && now - pumpStartMs > PUMP_MAX_ON_MS) {
+  if (!priming && !contMode() && now - pumpStartMs > PUMP_MAX_ON_MS) {
     setPumpDuty(0);
     lockout(L_PUMP_TIME);
     return;
@@ -785,8 +811,9 @@ void handleUi(uint32_t now) {
 
   switch (ui) {
     case UI_MAIN:
-      if (d != 0) {  // regulacja interwalu dawkowania z ekranu glownego
-        cfg.v[P_INTERVAL] = clampStep(P_INTERVAL, cfg.v[P_INTERVAL], d);
+      if (d != 0) {  // regulacja z ekranu glownego: predkosc (ciagly) albo interwal dawek
+        uint8_t id = contMode() ? P_SPEED : P_INTERVAL;
+        cfg.v[id] = clampStep(id, cfg.v[id], d);
         quickSavePending = true;
         quickSaveMs = now;
       }
@@ -910,6 +937,7 @@ struct Frame {
   int8_t hl;
   char st[12], fl[10], big[10], info[24], val[16], foot[44];
   uint8_t flX, bigX, valX, bar, dropF, crankF;
+  bool cont;
 } fr;
 bool rendering = false;
 
@@ -1008,9 +1036,11 @@ void drawMain(uint32_t now) {
     default:            strcpy_P(fl, PSTR("!płom")); break;  // brak kontroli plomienia
   }
 
-  // duza liczba: interwal
+  // duza liczba: predkosc pompy [%] (tryb ciagly) albo interwal dawek [s]
+  bool cont = contMode();
   uint16_t iv = cfg.v[P_INTERVAL];
-  formatFixed(iv, 1, big, sizeof big);
+  if (cont) formatFixed(effectivePower(), 0, big, sizeof big);
+  else formatFixed(iv, 1, big, sizeof big);
 
   // dolna linia
   if (state == ST_IGNITION) {
@@ -1020,6 +1050,11 @@ void drawMain(uint32_t now) {
     snprintf_P(info, sizeof info, PSTR("Zapłon: %s"), b);
   } else if (state == ST_RUN && flameLossMs > 0) {
     snprintf_P(info, sizeof info, PSTR("Bez płomienia %lu s"), flameLossMs / 1000);
+  } else if (cont) {
+    // l/h ~ wydajnosc przy 100 % * predkosc (pompa zebata: liniowo, przy malych obrotach mniej)
+    uint16_t lph = (uint16_t)((uint32_t)cfg.v[P_FLOW100] * effectivePower() / 10);
+    if (lph) snprintf_P(info, sizeof info, PSTR("ok. %u.%02u l/h"), lph / 100, lph % 100);
+    else snprintf_P(info, sizeof info, PSTR("praca ciągła"));
   } else {
     // dawek na minute z jednym miejscem po przecinku: 600 / interwal[0.1s]
     uint16_t dpm10 = (uint16_t)(6000UL / iv);
@@ -1032,7 +1067,8 @@ void drawMain(uint32_t now) {
   uint8_t bar = 0;
   if (state == ST_RUN || state == ST_IGNITION) {
     uint32_t iMs = intervalMs(), el = now - cycleStartMs;
-    bar = doseActive ? 128 : (uint8_t)(min(el, iMs) * 128UL / iMs);
+    if (cont) bar = (uint8_t)(effectivePower() * 128UL / 100);
+    else bar = doseActive ? 128 : (uint8_t)(min(el, iMs) * 128UL / iMs);
   }
 
   bool cycling = (state == ST_RUN || state == ST_IGNITION);
@@ -1063,6 +1099,7 @@ void drawMain(uint32_t now) {
   oled.setFont(u8g2_font_logisoso24_tn);
   fr.bigX = 100 - oled.getStrWidth(big);
   fr.bar = bar;
+  fr.cont = cont;
   fr.dropF = dropF;
   fr.crankF = crankF;
 }
@@ -1076,12 +1113,12 @@ void renderMain() {
   oled.drawXBMP(104, 0, IKONA_W, IKONA_H, IKONA_KORBA[fr.crankF]);
   // lewa strona: ikona dawkowania + podpis
   oled.drawXBMP(0, 14, IKONA_W, IKONA_H, IKONA_KROPLA[fr.dropF]);
-  drawStrP(0, 47, PSTR("DAWKA"));
+  drawStrP(0, 47, fr.cont ? PSTR("MOC") : PSTR("DAWKA"));
   // srodek: interwal (do x=100, zeby nie wchodzic pod ikone w rogu)
   oled.setFont(u8g2_font_logisoso24_tn);
   oled.drawStr(fr.bigX, 46, fr.big);
   oled.setFont(u8g2_font_10x20_tr);
-  drawStrP(104, 46, PSTR("s"));
+  drawStrP(104, 46, fr.cont ? PSTR("%") : PSTR("s"));
   oled.setFont(u8g2_font_6x10_pl);
   oled.drawUTF8(0, 56, fr.info);
   oled.drawFrame(0, 59, 128, 5);

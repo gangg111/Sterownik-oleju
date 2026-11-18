@@ -20,7 +20,19 @@ bezpośrednio na ekranie głównym.
   Krok enkodera: 0,1 s do 10 s, 0,5 s do 30 s, potem 1 s. Zapis do EEPROM 3 s po ostatnim ruchu.
 - Mniejszy interwał → więcej oleju → większa moc palnika.
 
-## Tryby dawki
+## Tryb ciągły (domyślny)
+
+Jak potencjometr „PRACA POMPY MIN–MAX” w fabrycznych zestawach: gdy YETI załącza dmuchawę, pompa
+zębata kręci się **bez przerw**, a enkoder na ekranie głównym ustawia **prędkość w %** (PWM, 10–100 %).
+Pompa zębata podaje olej proporcjonalnie do obrotów, więc płomień jest równy, a rurka zasilająca palnika
+nie przypieka się między dawkami. Po zmierzeniu wydajności przy 100 % (menu „Wydajność pompy przy 100%”,
+w l/h) ekran pokazuje orientacyjne l/h. Zbyt niska prędkość, przy której silnik staje, kończy się blokadą
+„Pompa zablokowana” (kontrola obrotu krańcówką) – wtedy podnieś prędkość.
+
+W pracy ciągłej co 5 min jest krótka (~0,5 s) przerwa na test: tranzystor wyłączony przy zamkniętym
+przekaźniku (wykrywa zwarty tranzystor) i test styku przekaźnika bezpieczeństwa.
+
+## Tryby dawki impulsowej (do wyboru w menu „Tryb dawkowania”)
 
 | Tryb | Jak liczona jest dawka | Kiedy |
 |---|---|---|
