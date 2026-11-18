@@ -114,6 +114,17 @@ export class Simulator {
     new AVREEPROM(cpu, this.eepromBackend);
     const clock = new AVRClock(cpu, FREQ, clockConfig);
     new AVRWatchdog(cpu, watchdogConfig, clock);
+    // Restart przez watchdoga: jak Optiboot, przekaz przyczyne resetu (WDRF) w rejestrze r2
+    // i ustaw piny w stan wysokiej impedancji (jak w prawdziwym procesorze po resecie).
+    this.wdtResets = 0;
+    const origReset = cpu.reset.bind(cpu);
+    cpu.reset = () => {
+      origReset();
+      cpu.data[2] = 0x08;
+      for (const a of [0x24, 0x25, 0x27, 0x28, 0x2a, 0x2b]) cpu.data[a] = 0;  // DDRx/PORTx
+      cpu.data[0x80] = 0; cpu.data[0x81] = 0;                               // TCCR1A/B
+      this.wdtResets++;
+    };
 
     // ---- stan "swiata"
     this.timeMs = 0;

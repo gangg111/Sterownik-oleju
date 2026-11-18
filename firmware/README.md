@@ -144,11 +144,37 @@ Arduino IDE: zainstaluj bibliotekę **U8g2** (Menedżer bibliotek), otwórz
 
 Zajętość: ok. 82 % Flash, 51 % RAM.
 
+## Odporność na zawieszenia
+
+**W programie:**
+
+| Zabezpieczenie | Co robi |
+|---|---|
+| Watchdog **250 ms** od pierwszej instrukcji | zawieszony program = reset po ¼ s; reset ustawia piny jako wejścia, rezystor 10 kΩ zamyka klucz pompy. Zawieszenie w trakcie dawki dokłada najwyżej ~0,25 s pracy pompy (sprawdzone w emulatorze: 255 ms, ~2 ml) |
+| Licznik restartów w pamięci `.noinit` | 3 restarty watchdoga bez 10 min stabilnej pracy = **blokada „Restarty MCU”** (sterownik, który ciągle się wiesza, przestaje podawać olej). Liczba restartów w menu Informacje (`WDT:`) |
+| Pierwsza dawka po starcie dopiero po pełnym interwale | restart nie daje dodatkowej dawki oleju |
+| Timeout I2C (5 ms) + ponowna inicjalizacja OLED | zakłócona magistrala nie zawiesi programu; ekran odświeżany co 10 min i po każdym błędzie I2C (tylko gdy pompa stoi) |
+| Kontrola sumy ustawień w RAM co 5 s | uszkodzone przez zakłócenia ustawienia są wczytywane ponownie z EEPROM |
+| Strażnik czasu pracy pompy (32 s) | pojedyncze załączenie dłuższe niż najdłuższa dawka = **blokada „Pompa za dlugo”** |
+| Blokady zapisane w EEPROM | zanik zasilania nie kasuje blokady |
+
+**Wymaganie:** bootloader **Optiboot** („nowy bootloader”). Sprawdzenie: jeśli program wgrywa się z ustawieniem
+procesora *ATmega328P* (a nie *ATmega328P (Old Bootloader)*), jest dobrze. Ze starym bootloaderem restart
+przez watchdoga potrafi zapętlić płytkę – wtedy wgraj Optiboot (Narzędzia → Wypal bootloader, przez drugie Arduino).
+
+**W sprzęcie (zakłócenia to główna przyczyna „kapryśnego” Arduino):**
+- Rezystor **10 kΩ baza–emiter BC547** jest obowiązkowy – trzyma pompę wyłączoną podczas resetu.
+- Arduino zasilaj z **osobnej przetwornicy 12→5 V**, przy płytce **470 µF + 100 nF**.
+- Na zaciskach silnika: **kondensator 100 nF ceramiczny** + dioda Schottky; na przewodzie silnika koralik ferrytowy.
+- Masa „gwiazdą”: prąd silnika wraca do zasilacza własnym przewodem, nie przez GND Arduino.
+- Przewody OLED (I2C) krótkie, do ~20 cm, z dala od silnika i 230 V; enkoder i krańcówka – skrętka.
+- Część 230 V (przekaźnik, transoptor, zasilacz) oddzielona od elektroniki 5 V, najlepiej przegrodą w obudowie.
+
 ## Logika bezpieczeństwa
 
 - 12 V do pompki idzie **przez przekaźnik sterowany z YETI i STB** – zawieszone Arduino nie poleje oleju,
   gdy YETI nie grzeje.
-- Watchdog 1 s.
+- Watchdog 250 ms + licznik restartów (szczegóły wyżej).
 - **Blokady** (pompa stop, buzzer, zapis w EEPROM): brak zapłonu w zadanym czasie, zanik płomienia,
   uszkodzona termopara, 12 V przy wyłączonym YETI (sklejony przekaźnik), brak obrotu pompy.
 - Bez czujnika płomienia ekran pokazuje „bez kontr” – **ustaw czujnik**, zanim zostawisz piec bez nadzoru.

@@ -16,6 +16,11 @@
  *
  * Biblioteka: U8g2 (Menedzer bibliotek Arduino: "U8g2" by oliver).
  * Opis podlaczenia: firmware/README.md
+ *
+ * Odpornosc na zawieszenia: watchdog 250 ms od pierwszej instrukcji, licznik restartow
+ * w pamieci .noinit (3 restarty bez 10 min stabilnej pracy = blokada), pierwsza dawka po
+ * starcie dopiero po pelnym interwale, timeout I2C z ponowna inicjalizacja OLED, kontrola
+ * sumy ustawien w RAM, straznik maksymalnego czasu pracy pompy.
  */
 
 #include <Arduino.h>
@@ -68,6 +73,12 @@ const uint8_t  FLAME_HYST_C       = 10;
 const uint32_t UI_TIMEOUT_MS      = 60000;
 const uint32_t PRIME_MAX_MS       = 60000;
 const uint16_t QUICK_SAVE_MS      = 3000;
+const uint32_t STABLE_MS          = 600000UL; // 10 min pracy bez restartu = licznik zawieszen zerowany
+const uint8_t  WDT_STREAK_LIMIT   = 3;     // tyle restartow watchdoga z rzedu = blokada
+const uint32_t PUMP_MAX_ON_MS     = 32000; // dluzej niz najdluzsza dawka (30 s) = blad logiki
+const uint32_t OLED_REINIT_MS     = 600000UL; // okresowe odswiezenie konfiguracji OLED (zaklocenia)
+const uint32_t I2C_TIMEOUT_US     = 5000;  // zawieszona magistrala I2C nie zablokuje programu
+const uint16_t CFG_CHECK_MS       = 5000;  // kontrola sumy ustawien w RAM
 const uint16_t PARK_MIN_GAP_MS    = 200;   // krotszy obrot = drgania styku
 const uint32_t REV_TIMEOUT_MS     = 8000;  // brak obrotu w tym czasie = blokada
 
@@ -140,9 +151,35 @@ Settings cfg;
 enum State : uint8_t { ST_IDLE, ST_IGNITION, ST_RUN, ST_LOCKOUT };
 const char STATE_NAMES[][11] PROGMEM = {"CZUWANIE", "ROZPALANIE", "PRACA", "BLOKADA"};
 
-enum LockReason : uint8_t { L_NONE, L_NO_IGNITION, L_FLAME_LOSS, L_SENSOR, L_RELAY, L_PUMP, L_COUNT };
+enum LockReason : uint8_t {
+  L_NONE, L_NO_IGNITION, L_FLAME_LOSS, L_SENSOR, L_RELAY, L_PUMP, L_WATCHDOG, L_PUMP_TIME, L_COUNT
+};
 const char LOCK_NAMES[][16] PROGMEM = {"", "Brak zaplonu", "Zanik plomienia", "Blad czujnika", "Przekaznik/12V",
-                                       "Pompa/krancowka"};
+                                       "Pompa/krancowka", "Restarty MCU", "Pompa za dlugo"};
+
+// ============================================================================
+//  ODPORNOSC NA ZAWIESZENIA
+//  Zmienne w sekcji .noinit nie sa zerowane przy restarcie (watchdog, przycisk RESET),
+//  tylko traca wartosc przy zaniku zasilania. Dzieki temu program wie, ze restartowal
+//  sie przez watchdoga i ile razy z rzedu.
+// ============================================================================
+uint8_t  bootFlags   __attribute__((section(".noinit")));  // MCUSR z chwili startu
+uint16_t noinitMagic __attribute__((section(".noinit")));
+uint8_t  wdtStreak   __attribute__((section(".noinit")));  // restarty WDT bez 10 min stabilnej pracy
+uint16_t wdtTotal    __attribute__((section(".noinit")));  // restarty WDT od wlaczenia zasilania
+const uint16_t NOINIT_MAGIC = 0xB007;
+
+// Wykonywane przed main(): zapamietaj przyczyne resetu i wylacz watchdoga, zanim
+// zdazy ponownie zresetowac procesor (inaczej moze powstac petla restartow).
+// Optiboot ("nowy bootloader") przekazuje MCUSR w rejestrze r2.
+void earlyInit() __attribute__((naked, used, section(".init3")));
+void earlyInit() {
+  uint8_t r2;
+  __asm__ __volatile__("mov %0, r2" : "=r"(r2));
+  bootFlags = MCUSR | r2;
+  MCUSR = 0;
+  wdt_disable();
+}
 
 State      state      = ST_IDLE;
 LockReason lockReason = L_NONE;
@@ -242,6 +279,7 @@ void loadSettings() {
     saveSettings();
   }
   for (uint8_t i = 0; i < P_COUNT; i++) cfg.v[i] = constrain(cfg.v[i], pMin(i), pMax(i));
+  cfg.checksum = calcChecksum(cfg);  // suma po ewentualnym przycieciu wartosci (kontrola RAM)
 
   uint8_t r = EEPROM.read(EE_LOCK);
   if (r >= L_COUNT) { r = L_NONE; EEPROM.update(EE_LOCK, r); }
@@ -258,6 +296,7 @@ void lockout(LockReason r) {
 
 void clearLockout() {
   lockReason = L_NONE;
+  wdtStreak = 0;
   state = ST_IDLE;
   relayFaultMs = 0;
   tcFaults = 0;
@@ -442,7 +481,9 @@ uint32_t intervalMs() {
 
 void resetCycle(uint32_t now) {
   doseActive = false;
-  cycleStartMs = now - intervalMs();  // pierwsza dawka od razu
+  // pierwsza dawka dopiero po pelnym interwale: restart sterownika (np. przez watchdoga)
+  // nie moze dawac dodatkowej dawki oleju przy kazdym uruchomieniu
+  cycleStartMs = now;
   ignElapsedMs = 0;
   flameLossMs = 0;
   runStartMs = now;
@@ -541,6 +582,13 @@ void updatePump(uint32_t now, uint32_t dt) {
   if (!pumpWasOn) {
     pumpWasOn = true;
     pumpStartMs = now;
+  }
+  // niezalezny straznik: pojedyncze zalaczenie pompy nigdy nie trwa dluzej niz najdluzsza
+  // dawka; dluzej = uszkodzony stan programu (np. zaklocenia w RAM) -> twarde zatrzymanie
+  if (!priming && now - pumpStartMs > PUMP_MAX_ON_MS) {
+    setPumpDuty(0);
+    lockout(L_PUMP_TIME);
+    return;
   }
   // "kopniecie": pelna moc na starcie, zeby ruszyc zimny olej / zatarty silnik
   setPumpDuty(now - pumpStartMs < cfg.v[P_KICK] ? 100 : (uint8_t)effectivePower());
@@ -828,8 +876,8 @@ void drawInfo(uint32_t now) {
   uint32_t ml = doseCount * cfg.v[P_DOSE_ML] / 100;  // ml podane od wlaczenia
   if (cfg.v[P_DOSE_ML]) snprintf_P(l[2], 24, PSTR("Dawek:%lu %lu.%luL"), doseCount, ml / 1000, (ml / 100) % 10);
   else snprintf_P(l[2], 24, PSTR("Dawek: %lu"), doseCount);
-  snprintf_P(l[3], 24, PSTR("Krancowka: %S"),
-             digitalRead(PIN_PARK) == PARK_ACTIVE_LEVEL ? PSTR("PARK") : PSTR("-"));
+  snprintf_P(l[3], 24, PSTR("Kranc:%S  WDT:%u"),
+             digitalRead(PIN_PARK) == PARK_ACTIVE_LEVEL ? PSTR("PARK") : PSTR("-"), wdtTotal);
   drawLines(PSTR("INFORMACJE"), l, 4, -1);
 }
 
@@ -884,9 +932,28 @@ void drawPrime() {
   drawLines(PSTR("ODPOWIETRZANIE"), l, 4, priming ? 2 : -1);
 }
 
+void oledInit() {
+  oled.setBusClock(400000);
+  // begin() = Wire.begin() + impuls resetu i czekanie na sterownik OLED (~200 ms),
+  // wiec na ten czas watchdog dostaje 1 s, potem wraca do 250 ms
+  wdt_enable(WDTO_1S);
+  oled.begin();
+  wdt_enable(WDTO_250MS);
+  Wire.setWireTimeout(I2C_TIMEOUT_US, true); // przy zawieszeniu I2C: przerwij i zresetuj TWI
+  Wire.clearWireTimeoutFlag();
+}
+
 void updateDisplay(uint32_t now) {
+  static uint32_t lastReinitMs = 0;
   if (now - lastDisplayMs < DISPLAY_PERIOD_MS) return;
   lastDisplayMs = now;
+  // blad magistrali I2C (zaklocenia od silnika / 230 V) albo okresowo: ponowna konfiguracja
+  // OLED - zaklocenie potrafi rozkonfigurowac sterownik ekranu bez zadnego bledu na I2C
+  // (tylko gdy pompa stoi - inicjalizacja trwa ~200 ms i nie moze wydluzac dawki)
+  if (pumpDuty == 0 && (Wire.getWireTimeoutFlag() || now - lastReinitMs >= OLED_REINIT_MS)) {
+    lastReinitMs = now;
+    oledInit();
+  }
   switch (ui) {
     case UI_MAIN:  drawMain(now); break;
     case UI_MENU:  drawMenu(); break;
@@ -900,10 +967,25 @@ void updateDisplay(uint32_t now) {
 //  SETUP / LOOP
 // ============================================================================
 void setup() {
-  MCUSR = 0;
-  wdt_disable();
+  pumpPwmInit();  // najpierw: pompa na pewno wylaczona
+  // Watchdog od samego poczatku (takze inicjalizacja ekranu moze sie zawiesic), z krotkim
+  // czasem 250 ms: przy zawieszeniu w trakcie dawki pompa pracuje najwyzej 0,25 s dluzej,
+  // bo reset procesora ustawia piny jako wejscia, a rezystor 10k zamyka klucz pompy.
+  // Najdluzszy przebieg petli (rysowanie ekranu + zapis EEPROM) to ok. 100 ms.
+  // Wymaga bootloadera Optiboot ("nowy bootloader") - stary wpada w petle restartow.
+  wdt_enable(WDTO_250MS);
 
-  pumpPwmInit();  // najpierw: MOSFET na pewno wylaczony
+  // przyczyna startu: zimny start (zasilanie) zeruje liczniki, restart watchdoga je zwieksza
+  bool cold = (bootFlags & _BV(PORF)) || noinitMagic != NOINIT_MAGIC;
+  if (cold) {
+    noinitMagic = NOINIT_MAGIC;
+    wdtStreak = 0;
+    wdtTotal = 0;
+  } else if (bootFlags & _BV(WDRF)) {
+    if (wdtStreak < 255) wdtStreak++;
+    wdtTotal++;
+  }
+
   pinMode(PIN_BUZZER, OUTPUT);
   setBuzzer(false);
 
@@ -918,7 +1000,9 @@ void setup() {
   pinMode(PIN_TC_SCK, OUTPUT);
   pinMode(PIN_TC_SO, INPUT);
 
-  loadSettings();
+  loadSettings();                            // pierwszy start: zapis domyslnych do EEPROM ~90 ms
+  wdt_reset();
+  if (wdtStreak >= WDT_STREAK_LIMIT) lockout(L_WATCHDOG);  // ciagle zawieszenia = nie ufaj sobie
   if (lockReason != L_NONE) state = ST_LOCKOUT;
 
   attachInterrupt(digitalPinToInterrupt(PIN_ENC_A), encoderIsr, CHANGE);
@@ -927,8 +1011,7 @@ void setup() {
   PCMSK0 |= _BV(PCINT0);   // D8 - krancowka
   PCICR  |= _BV(PCIE2) | _BV(PCIE0);
 
-  oled.setBusClock(400000);
-  oled.begin();
+  oledInit();
   oled.firstPage();
   do {
     oled.setFont(u8g2_font_7x14B_tr);
@@ -936,10 +1019,23 @@ void setup() {
     oled.setFont(u8g2_font_6x10_tr);
     drawStrP(0, 44, PSTR("pompka 12V / YETI"));
   } while (oled.nextPage());
-  delay(800);
+  for (uint8_t i = 0; i < 8; i++) {  // ekran powitalny 0.8 s, z karmieniem watchdoga
+    delay(100);
+    wdt_reset();
+  }
 
   v12 = analogRead(PIN_VSENSE) * (5.0f / 1023.0f) * VSENSE_RATIO;
-  wdt_enable(WDTO_1S);
+}
+
+// Okresowe kontrole poprawnosci stanu programu
+void selfCheck(uint32_t now) {
+  static uint32_t lastCheckMs = 0;
+  // po 10 min stabilnej pracy wczesniejsze restarty watchdoga nie licza sie do blokady
+  if (wdtStreak && now >= STABLE_MS) wdtStreak = 0;
+  if (now - lastCheckMs < CFG_CHECK_MS) return;
+  lastCheckMs = now;
+  // ustawienia w RAM uszkodzone (zaklocenia)? -> wczytaj ponownie z EEPROM
+  if (!quickSavePending && ui != UI_EDIT && calcChecksum(cfg) != cfg.checksum) loadSettings();
 }
 
 void loop() {
@@ -949,6 +1045,7 @@ void loop() {
   lastMs = now;
 
   wdt_reset();
+  selfCheck(now);
   updateYeti(now);
   updateVoltage();
   updateFlame(now);
