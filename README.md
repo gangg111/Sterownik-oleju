@@ -171,7 +171,12 @@ dopóki woda nie wystygnie poniżej „TEMP. WYŁĄCZENIA REG.”. Minimum, któ
 - **Elektrozawór NC** zasilaj z +12 V za przekaźnikiem (otwarty cały czas, gdy dmuchawa jest załączona),
   a nie z wyjścia PWM pompy – na PWM by brzęczał.
 
-Części: wąż olejoodporny (paliwowy NBR) 6–8 mm, opaski, trójnik mosiężny z króćcami na wąż,
+**Pompa jest zębata** (pompa oleju z silnika): wydatek rośnie płynnie z kątem obrotu, więc dawkowanie
+czasem (np. 0,3–0,8 s) działa także przy niepełnym obrocie. Żeby olej nie spływał z rury wylotowej
+między dawkami (wtedy następna dawka najpierw ją dopełnia), za filtrem daj **zawór zwrotny** o niskim
+ciśnieniu otwarcia: pompa → filtr → zawór zwrotny → trójnik.
+
+Części: zawór zwrotny mosiężny 1/4" lub na wąż 8 mm, wąż olejoodporny (paliwowy NBR) 6–8 mm, opaski, trójnik mosiężny z króćcami na wąż,
 zawór iglicowy mosiężny 1/4" BSP + 2 króćce 1/4" → wąż, filtr paliwa (ciągnikowy/motocyklowy) przed trójnikiem.
 
 **Regulacja:** zaworek zgrubnie (raz), enkoder (interwał) na bieżąco. Gęstość przepracowanego oleju
