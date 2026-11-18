@@ -108,6 +108,20 @@ Typowe oznaczenia: **31** masa, **53** bieg wolny, **53b** szybki, **53a** +12 V
 parkowania** (wtedy Informacje → „Krancowka: PARK”). Jeśli u Ciebie jest odwrotnie, zmień w kodzie
 `PARK_ACTIVE_LEVEL` na `HIGH`. Zacisku **53a nie podłączaj** – inaczej na 31b pojawi się 12 V.
 
+### Silnik z kostką 5-pinową – jak rozpoznać piny
+Kolejność pinów zależy od producenta, więc trzeba ją ustalić miernikiem. Odłącz wszystko i sprawdź:
+
+1. **Masa 31:** pin, który ma ~0 Ω do metalowej obudowy przekładni (w części tanich silników
+   masa nie jest na obudowie – wtedy to wspólny pin szczotek z kroku 2).
+2. **Szczotki 53 i 53b:** między masą a tymi pinami jest kilka omów (~0,5–3 Ω).
+   Zasil na chwilę 12 V **przez żarówkę 21 W albo zasilacz z ograniczeniem prądu**:
+   wolniejszy = **53 (bieg wolny)**, szybszy = **53b**.
+3. **Krańcówka 53a / 31b:** dwa pozostałe piny. Kręcąc silnikiem (zasilanym na 53), mierz ciągłość
+   między nimi i masą: **31b** raz na obrót przełącza się między 53a a masą. 53a zostaw niepodłączony,
+   31b → D8 przez 1 kΩ.
+
+Zapisz wynik (np. „pin 1 = 31, pin 3 = 53, pin 5 = 31b”) – przydaje się przy naprawach.
+
 ## Lista części
 
 | Część | Uwagi |
